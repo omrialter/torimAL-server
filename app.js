@@ -19,7 +19,7 @@ const app = express();
 })();
 
 app.use(cors());
-app.use(express.json({ limit: "5 mb" }));
+app.use(express.json({ limit: "5mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 const server = http.createServer(app);
 

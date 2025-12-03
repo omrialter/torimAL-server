@@ -30,6 +30,7 @@ const businessSchema = new mongoose.Schema({
         type: String,
         default: ""
     },
+    openingHoursTxt: String,
     services: [
         {
             name: String,
@@ -64,6 +65,7 @@ exports.validateBusiness = (_reqBody) => {
         name: Joi.string().min(2).max(200).required(),
         phone: Joi.string().min(6).max(20),
         email: Joi.string().max(200).email().required(),
+        openingHoursTxt: Joi.string().max(100),
         address: Joi.string().max(300),
         owner: Joi.string().hex().length(24), // ObjectId של בעל העסק
         services: Joi.array().items(Joi.object({
