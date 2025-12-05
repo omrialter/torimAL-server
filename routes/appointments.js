@@ -13,62 +13,66 @@ const BLOCKING_STATUSES = ['confirmed'];
 const minutesToMs = (min) => min * 60 * 1000;
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-function utcDayRange(dateStr) {
-    const start = new Date(`${dateStr}T00:00:00.000Z`);
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-    return { start, end };
-}
+// כמה מילישניות זה 24 שעות
+const HOURS_24_MS = 24 * 60 * 60 * 1000;
 
 /**
  * GET /appointments/by-day?date=YYYY-MM-DD&worker=xxxxx
- * מחזיר את התורים של עובד מסוים ביום מסוים
+ * מחזיר את התורים של עובד מסוים ביום מסוים (עבור admin)
  */
-router.get('/by-day', auth, async (req, res) => {
+router.get("/by-day", auth, async (req, res) => {
     try {
-        const { date, worker } = req.query;
         const { business } = req.tokenData;
+        const { date, worker } = req.query;
 
         if (!business || !isValidObjectId(business)) {
-            return res
-                .status(400)
-                .json({ error: 'Invalid or missing business id' });
+            return res.status(400).json({ error: "Invalid or missing business id" });
         }
 
-        if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return res
-                .status(400)
-                .json({ error: 'Invalid or missing date (expected YYYY-MM-DD)' });
+        if (!date) {
+            return res.status(400).json({ error: "date query is required (YYYY-MM-DD)" });
         }
 
-        if (!worker || !isValidObjectId(worker)) {
-            return res
-                .status(400)
-                .json({ error: 'Missing or invalid worker id' });
+        const day = new Date(date);
+        if (Number.isNaN(day.getTime())) {
+            return res.status(400).json({ error: "Invalid date format" });
         }
 
-        const { start, end } = utcDayRange(date);
+        const dayStart = new Date(day);
+        dayStart.setHours(0, 0, 0, 0);
 
-        const appts = await AppointmentModel.find({
+        const dayEnd = new Date(day);
+        dayEnd.setHours(23, 59, 59, 999);
+
+        const query = {
             business,
-            worker, // 👈 רק התורים של העובד הזה
-            start: { $lt: end },
-            $expr: {
-                $gt: [
-                    { $add: ['$start', { $multiply: ['$service.duration', 60000] }] },
-                    start
-                ]
-            }
-        })
+            start: { $gte: dayStart, $lt: dayEnd },
+        };
+
+        if (worker && isValidObjectId(worker)) {
+            query.worker = worker;
+        } else {
+            return res.status(400).json({ error: "Missing or invalid worker id" });
+        }
+
+        const appts = await AppointmentModel.find(query)
             .sort({ start: 1 })
+            .populate("business", "name address phone")
+            .populate("worker", "name fullName phone")
+            .populate("client", "name phone") // 👈 הכי חשוב
             .lean()
             .exec();
+
+        // אפשר להשאיר לוג דיבאג זמני
+        console.log("SERVER by-day sample appt:", appts[0]);
 
         return res.json(appts);
     } catch (err) {
         console.error(err);
-        return res.status(502).json({ error: 'Server error' });
+        return res.status(502).json({ error: "Server error" });
     }
 });
+
 
 /**
  * POST /appointments
@@ -241,6 +245,57 @@ router.patch('/:id/status', authAdmin, async (req, res) => {
         return res.json(updated);
     } catch (err) {
         console.error(err);
+        return res.status(502).json({ error: 'Server error' });
+    }
+});
+
+
+/**
+ * PATCH /appointments/:id/cancel
+ * ביטול תור ע"י הלקוח (לא אדמין)
+ */
+router.patch('/:id/cancel', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { _id: clientId, business } = req.tokenData;
+
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ error: 'Invalid appointment id' });
+        }
+
+        if (!isValidObjectId(clientId) || !isValidObjectId(business)) {
+            return res.status(400).json({ error: 'Invalid token data' });
+        }
+
+        const appt = await AppointmentModel.findOne({
+            _id: id,
+            client: clientId,
+            business
+        }).exec();
+
+        if (!appt) {
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+
+        if (appt.status !== 'confirmed') {
+            return res.status(400).json({ error: 'ONLY_CONFIRMED_CAN_BE_CANCELED' });
+        }
+
+        const now = new Date();
+        const diffMs = appt.start.getTime() - now.getTime();
+
+        if (diffMs < HOURS_24_MS) {
+            return res.status(409).json({
+                error: 'CANNOT_CANCEL_WITHIN_24H'
+            });
+        }
+
+        appt.status = 'canceled';
+        await appt.save();
+
+        return res.json(appt);
+    } catch (err) {
+        console.error('❌ Error in PATCH /appointments/:id/cancel', err);
         return res.status(502).json({ error: 'Server error' });
     }
 });

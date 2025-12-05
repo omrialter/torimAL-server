@@ -16,7 +16,21 @@ const businessSchema = new mongoose.Schema({
     phone: String,
     email: String,
     address: String,
-    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'users' },
+
+    // 👇 בעל העסק – ObjectId ל-User, חובה
+    owner: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'users',
+        required: true
+    },
+
+    // 👇 עובדים – מערך ObjectId ל-User, נוכל לפופלייט
+    workers: [
+        {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'users'
+        }
+    ],
 
     portfolio: {
         type: [String],
@@ -47,9 +61,7 @@ const businessSchema = new mongoose.Schema({
 
 exports.BusinessModel = mongoose.model('businesses', businessSchema);
 
-
 exports.validateBusiness = (_reqBody) => {
-
     const timeRange = Joi.object({
         open: Joi.string()
             .allow(null)
@@ -67,12 +79,20 @@ exports.validateBusiness = (_reqBody) => {
         email: Joi.string().max(200).email().required(),
         openingHoursTxt: Joi.string().max(100),
         address: Joi.string().max(300),
-        owner: Joi.string().hex().length(24), // ObjectId של בעל העסק
+
+        // 👇 עכשיו owner חובה – כמו שאמרת: אי אפשר עסק בלי owner
+        owner: Joi.string().hex().length(24).required(),
+
+        workers: Joi.array().items(
+            Joi.string().hex().length(24)
+        ),
+
         services: Joi.array().items(Joi.object({
             name: Joi.string().min(1).max(100).required(),
             duration: Joi.number().min(1).max(480).required(),
             price: Joi.number().min(0).required()
         })),
+
         openingHours: Joi.object({
             sunday: timeRange,
             monday: timeRange,

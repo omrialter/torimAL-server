@@ -28,7 +28,12 @@ router.get("/businessInfo/:id", auth, async (req, res) => {
     }
 
     try {
-        const businessDoc = await BusinessModel.findById(id).lean().exec();
+        const businessDoc = await BusinessModel.findById(id)
+            .populate("owner", "_id name phone avatarUrl")
+            .populate("workers", "_id name phone avatarUrl")
+            .lean()
+            .exec();
+
         if (!businessDoc) {
             return res.status(404).json({ error: "Business not found" });
         }
@@ -54,7 +59,10 @@ router.post("/", authAdmin, async (req, res) => {
     } catch (err) {
         console.log(err);
         if (err.code === 11000) {
-            res.status(400).json({ msg: "business with that email already exists", code: 11000 });
+            res.status(400).json({
+                msg: "business with that email already exists",
+                code: 11000
+            });
         } else {
             res.status(500).json({ msg: "Server error", error: err.message });
         }
@@ -87,7 +95,11 @@ router.patch("/:id/set-owner", authAdmin, async (req, res) => {
             { _id: businessId },
             { owner: ownerId },
             { new: true }
-        ).exec();
+        )
+            .populate("owner", "_id name phone avatarUrl")
+            .populate("workers", "_id name phone avatarUrl")
+            .lean()
+            .exec();
 
         if (!updated) {
             return res.status(404).json({ msg: "Business not found" });
