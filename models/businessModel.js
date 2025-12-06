@@ -44,7 +44,9 @@ const businessSchema = new mongoose.Schema({
         type: String,
         default: ""
     },
+
     openingHoursTxt: String,
+
     services: [
         {
             name: String,
@@ -52,10 +54,19 @@ const businessSchema = new mongoose.Schema({
             price: Number
         }
     ],
+
+    // 🎨 צבעים של העסק – 3 סטרינגים (primary, secondary, third)
+    business_colors: {
+        primary: { type: String, default: "#111" },
+        secondary: { type: String, default: "#f3f4f6" },
+        third: { type: String, default: "#fff" }
+    },
+
     openingHours: {
         type: Object,
         default: () => ({ ...defaultOpeningHours })
     },
+
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -80,7 +91,14 @@ exports.validateBusiness = (_reqBody) => {
         openingHoursTxt: Joi.string().max(100),
         address: Joi.string().max(300),
 
-        // 👇 עכשיו owner חובה – כמו שאמרת: אי אפשר עסק בלי owner
+        // 🎨 אם שולחים business_colors – כל שלושת השדות חובה
+        business_colors: Joi.object({
+            primary: Joi.string().max(20).required(),
+            secondary: Joi.string().max(20).required(),
+            third: Joi.string().max(20).required()
+        }).optional(),
+
+        // 👇 עכשיו owner חובה – אי אפשר עסק בלי owner
         owner: Joi.string().hex().length(24).required(),
 
         workers: Joi.array().items(
