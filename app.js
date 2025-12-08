@@ -1,9 +1,10 @@
 const express = require("express");
+require("dotenv").config();   // 👈 חייב להיות כאן!
+
 const http = require("http");
 const path = require("path");
 const { routesInit } = require("./routes/configRoutes");
 const cors = require("cors");
-
 
 const { connectToMongo } = require("./db/mongoConnect");
 const app = express();
@@ -21,6 +22,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
 const server = http.createServer(app);
 
 routesInit(app);

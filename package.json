@@ -12,12 +12,15 @@
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.10.0",
+    "cloudinary": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^4.18.2",
     "firebase-admin": "^13.4.0",
     "joi": "^17.13.3",
     "jsonwebtoken": "^9.0.2",
-    "mongoose": "^8.16.0"
+    "mongoose": "^8.16.0",
+    "multer": "^2.0.2",
+    "streamifier": "^0.1.1"
   }
 }
