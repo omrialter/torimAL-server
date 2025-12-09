@@ -12,12 +12,8 @@ const defaultOpeningHours = {
     saturday: { open: null, close: null }, // סגור
 };
 
-// 👇 סכמה לשירותים – עם _id מסוג String (cut, cut+beard, beard...)
+// 👇 סכמה לשירותים – בלי _id; מונגוס ייצור ObjectId אוטומטי
 const serviceSchema = new mongoose.Schema({
-    _id: {
-        type: String,
-        required: true, // מזהה טקסטואלי לשירות
-    },
     name: {
         type: String,
         required: true,
@@ -105,7 +101,7 @@ const businessSchema = new mongoose.Schema({
         default: "",
     },
 
-    // 👇 עכשיו services משתמש בסכמה עם _id מסוג String
+    // 👇 services – כל שירות יקבל ObjectId אוטומטי
     services: {
         type: [serviceSchema],
         default: () => [],
@@ -169,10 +165,9 @@ exports.validateBusiness = (_reqBody) => {
 
         workers: Joi.array().items(Joi.string().hex().length(24)),
 
-        // 👇 עכשיו גם השירותים מכילים _id סטרינג
+        // 👇 שירותים – בלי _id, רק name/duration/price
         services: Joi.array().items(
             Joi.object({
-                _id: Joi.string().min(1).max(100).required(),
                 name: Joi.string().min(1).max(100).required(),
                 duration: Joi.number().min(1).max(480).required(),
                 price: Joi.number().min(0).required(),

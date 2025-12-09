@@ -179,6 +179,19 @@ const openingHoursSchema = Joi.object({
     }).required(),
 });
 
+/* Joi לשירותים */
+const serviceBodySchema = Joi.object({
+    name: Joi.string().min(1).max(100).required(),
+    duration: Joi.number().min(1).max(480).required(),
+    price: Joi.number().min(0).required(),
+});
+
+const serviceUpdateSchema = Joi.object({
+    name: Joi.string().min(1).max(100),
+    duration: Joi.number().min(1).max(480),
+    price: Joi.number().min(0),
+}).min(1);
+
 /* ======================================================
    🟢 HEALTH CHECK
 ====================================================== */
@@ -732,6 +745,138 @@ router.patch("/:id/opening-hours", authAdmin, async (req, res) => {
         res.json({ msg: "OpeningHours updated", business: updated });
     } catch (err) {
         console.error("PATCH /:id/opening-hours error:", err);
+        res.status(500).json({ msg: "Server error", error: err.message });
+    }
+});
+
+/* ======================================================
+   💈 SERVICES CRUD (ADD / UPDATE / DELETE)
+====================================================== */
+
+/**
+ * POST /businesses/:id/services
+ * יצירת שירות חדש לעסק
+ */
+router.post("/:id/services", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId)) {
+            return res.status(400).json({ msg: "Invalid business id" });
+        }
+
+        if (business && business !== businessId) {
+            return res.status(403).json({ msg: "Wrong business" });
+        }
+
+        const { error, value } = serviceBodySchema.validate(req.body);
+        if (error) {
+            return res
+                .status(400)
+                .json({ msg: "Invalid service", details: error.details });
+        }
+
+        const biz = await BusinessModel.findById(businessId);
+        if (!biz) return res.status(404).json({ msg: "Business not found" });
+
+        // מוסיפים שירות חדש – ObjectId אוטומטי
+        biz.services.push({
+            name: value.name,
+            duration: value.duration,
+            price: value.price,
+        });
+
+        await biz.save();
+
+        const newService = biz.services[biz.services.length - 1];
+
+        res.json({ msg: "Service added", business: biz, service: newService });
+    } catch (err) {
+        console.error("POST /:id/services error:", err);
+        res.status(500).json({ msg: "Server error", error: err.message });
+    }
+});
+
+/**
+ * PATCH /businesses/:id/services/:serviceId
+ * עדכון שירות קיים
+ */
+router.patch("/:id/services/:serviceId", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const serviceId = (req.params.serviceId ?? "").trim();
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId)) {
+            return res.status(400).json({ msg: "Invalid business id" });
+        }
+
+        if (business && business !== businessId) {
+            return res.status(403).json({ msg: "Wrong business" });
+        }
+
+        const { error, value } = serviceUpdateSchema.validate(req.body);
+        if (error) {
+            return res
+                .status(400)
+                .json({ msg: "Invalid service update", details: error.details });
+        }
+
+        const biz = await BusinessModel.findById(businessId);
+        if (!biz) return res.status(404).json({ msg: "Business not found" });
+
+        // מציאת סאב־דוקומנט לפי ObjectId
+        const service = biz.services.id(serviceId);
+        if (!service) {
+            return res.status(404).json({ msg: "Service not found" });
+        }
+
+        if (value.name !== undefined) service.name = value.name;
+        if (value.duration !== undefined) service.duration = value.duration;
+        if (value.price !== undefined) service.price = value.price;
+
+        await biz.save();
+
+        res.json({ msg: "Service updated", business: biz, service });
+    } catch (err) {
+        console.error("PATCH /:id/services/:serviceId error:", err);
+        res.status(500).json({ msg: "Server error", error: err.message });
+    }
+});
+
+/**
+ * DELETE /businesses/:id/services/:serviceId
+ * מחיקת שירות
+ */
+router.delete("/:id/services/:serviceId", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const serviceId = (req.params.serviceId ?? "").trim();
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId)) {
+            return res.status(400).json({ msg: "Invalid business id" });
+        }
+
+        if (business && business !== businessId) {
+            return res.status(403).json({ msg: "Wrong business" });
+        }
+
+        const biz = await BusinessModel.findById(businessId);
+        if (!biz) return res.status(404).json({ msg: "Business not found" });
+
+        const service = biz.services.id(serviceId);
+        if (!service) {
+            return res.status(404).json({ msg: "Service not found" });
+        }
+
+        service.deleteOne();
+        await biz.save();
+
+        res.json({ msg: "Service deleted", business: biz });
+    } catch (err) {
+        console.error("DELETE /:id/services/:serviceId error:", err);
         res.status(500).json({ msg: "Server error", error: err.message });
     }
 });

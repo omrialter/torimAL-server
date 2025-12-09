@@ -125,6 +125,72 @@ router.get("/my", auth, async (req, res) => {
     }
 });
 
+
+
+/**
+ * ------------------------------------------------------------------
+ * GET /appointments/admin-stats  (אדמין)
+ * ------------------------------------------------------------------
+ * מחזיר:
+ *  - כמה תורים יש היום (לא כולל מבוטלים)
+ *  - כמה תורים עתידיים יש (מהרגע הנוכחי והלאה, לא כולל מבוטלים)
+ * אפשר לסנן לפי עובד עם ?worker=xxxxx
+ */
+router.get("/admin-stats", authAdmin, async (req, res) => {
+    try {
+        const { business } = req.tokenData;
+        const { worker } = req.query;
+
+        if (!business || !isValidObjectId(business)) {
+            return res.status(400).json({ error: "Invalid or missing business id" });
+        }
+
+        // בסיס לפילטר – העסק + לא כולל תורים מבוטלים
+        const baseFilter = {
+            business,
+            status: { $ne: "canceled" } // לא סופרים תורים שבוטלו
+        };
+
+        // אם נשלח worker – נסנן רק לעובד הזה
+        if (worker) {
+            if (!isValidObjectId(worker)) {
+                return res.status(400).json({ error: "Invalid worker id" });
+            }
+            baseFilter.worker = worker;
+        }
+
+        const now = new Date();
+
+        // משתמשים בפונקציה הקיימת utcDayRange כדי לחשב את טווח היום (UTC)
+        const todayStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+        const { start: todayStart, end: todayEnd } = utcDayRange(todayStr);
+
+        const [todayCount, futureCount] = await Promise.all([
+            // כמה תורים היום (לא מבוטלים)
+            AppointmentModel.countDocuments({
+                ...baseFilter,
+                start: { $gte: todayStart, $lt: todayEnd }
+            }),
+
+            // כמה תורים עתידיים (מהרגע הזה והלאה, לא מבוטלים)
+            AppointmentModel.countDocuments({
+                ...baseFilter,
+                start: { $gte: now }
+            })
+        ]);
+
+        return res.json({ todayCount, futureCount });
+    } catch (err) {
+        console.error("❌ Error in GET /appointments/admin-stats:", err);
+        return res.status(502).json({ error: "Server error" });
+    }
+});
+
+
+
+
+
+
 /**
  * ------------------------------------------------------------------
  * POST /appointments
