@@ -166,7 +166,7 @@ router.post("/", auth, async (req, res) => {
         }
 
         /**
-         * ⭐ NEW: היוזר לא יכול לקבוע אם יש לו כבר 2 תורים מאושרים
+         * ⭐ NEW: היוזר לא יכול לקבוע אם יש לו כבר 3 תורים מאושרים
          */
         const confirmedCount = await AppointmentModel.countDocuments({
             business,
@@ -174,10 +174,10 @@ router.post("/", auth, async (req, res) => {
             status: "confirmed"
         });
 
-        if (confirmedCount >= 2) {
+        if (confirmedCount >= 3) {
             return res.status(403).json({
                 error: "MAX_CONFIRMED_REACHED",
-                message: "לא ניתן לקבוע יותר מ־2 תורים במצב מאושר."
+                message: "לא ניתן לקבוע יותר מ3 תורים במצב מאושר."
             });
         }
 
