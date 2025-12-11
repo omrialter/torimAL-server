@@ -22,6 +22,10 @@ const userSchema = new mongoose.Schema({
         enum: ["user", "admin"],
         default: "user"
     },
+    expoPushToken: {
+        type: String,
+        default: null,
+    },
     date_created: {
         type: Date,
         default: Date.now

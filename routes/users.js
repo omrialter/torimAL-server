@@ -4,6 +4,7 @@ const router = express.Router();
 const admin = require('../services/firebase.js');
 const { auth, authAdmin } = require("../auth/auth.js");
 const { toE164IL } = require('../services/utils_phone.js');  // ודא שהנתיב נכון!
+const { sendPushToToken } = require("../services/pushService");
 
 
 // -------------------------
@@ -119,6 +120,63 @@ router.post('/verify', async (req, res) => {
         return res.status(401).json({ error: 'Invalid Firebase ID token' });
     }
 });
+
+/**
+ * POST /users/me/push-token
+ * שומר את Expo Push Token של המשתמש המחובר
+ */
+router.post("/me/push-token", auth, async (req, res) => {
+    try {
+        const { expoPushToken } = req.body;
+
+        if (!expoPushToken) {
+            return res.status(400).json({ error: "expoPushToken is required" });
+        }
+
+        await UserModel.updateOne(
+            { _id: req.tokenData._id },
+            { $set: { expoPushToken } }
+        );
+
+        res.json({ ok: true });
+    } catch (err) {
+        console.error("Error updating push token:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+/**
+ * POST /users/me/test-push
+ * שולח למשתמש המחובר התראת בדיקה
+ */
+router.post("/me/test-push", auth, async (req, res) => {
+    try {
+        const user = await UserModel.findById(req.tokenData._id);
+
+        if (!user) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        if (!user.expoPushToken) {
+            return res
+                .status(400)
+                .json({ error: "User has no expoPushToken saved" });
+        }
+
+        await sendPushToToken(
+            user.expoPushToken,
+            "בדיקת פוש",
+            "אם אתה רואה את זה – המערכת עובדת ✅",
+            { type: "test" }
+        );
+
+        res.json({ ok: true });
+    } catch (err) {
+        console.error("test-push error:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
 
 
 module.exports = router;

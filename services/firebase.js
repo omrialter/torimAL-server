@@ -1,23 +1,5 @@
-// // firebase.js
-// const admin = require('firebase-admin');
+// firebase.js
 
-// const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-// if (!raw) throw new Error('FIREBASE_SERVICE_ACCOUNT_JSON not set');
-
-// let serviceAccount;
-// try {
-//     serviceAccount = JSON.parse(raw);
-// } catch (err) {
-//     throw new Error('Invalid FIREBASE_SERVICE_ACCOUNT_JSON: ' + err.message);
-// }
-
-// admin.initializeApp({
-//     credential: admin.credential.cert(serviceAccount),
-// });
-
-// module.exports = admin;
-
-// services/firebase.js
 const admin = require('firebase-admin');
 
 const {
