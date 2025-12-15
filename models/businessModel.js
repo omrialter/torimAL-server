@@ -164,12 +164,7 @@ exports.validateBusiness = (_reqBody) => {
         owner: Joi.string().hex().length(24).required(),
 
         workers: Joi.array().items(Joi.string().hex().length(24)),
-        workers2: Joi.array().items(
-            Joi.object({
-                name: Joi.string().min(1).max(100).required(),
-                image: Joi.string().uri().allow(""),
-            })
-        ),
+
 
         // 👇 שירותים – בלי _id, רק name/duration/price
         services: Joi.array().items(

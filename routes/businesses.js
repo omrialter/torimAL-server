@@ -881,4 +881,116 @@ router.delete("/:id/services/:serviceId", authAdmin, async (req, res) => {
     }
 });
 
+/* ======================================================
+   HELPER: Phone Normalization (כמו באפליקציה)
+====================================================== */
+const normalizePhone = (phone) => {
+    if (!phone) return "";
+    const p = phone.trim();
+    // אם מתחיל ב-0, נחליף ב-+972
+    if (p.startsWith("0")) {
+        return p.replace(/^0/, "+972");
+    }
+    return p;
+};
+
+/* ======================================================
+   👷 ADD WORKER (Auto Upgrade to Admin)
+====================================================== */
+router.post("/:id/workers", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const { phone } = req.body;
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId))
+            return res.status(400).json({ msg: "Invalid business id" });
+
+        if (business && business !== businessId)
+            return res.status(403).json({ msg: "Wrong business" });
+
+        if (!phone) return res.status(400).json({ msg: "Phone is required" });
+
+        // נרמול טלפון
+        const normalizedPhone = normalizePhone(phone);
+
+        const UserModel = mongoose.model("users");
+        const userToAdd = await UserModel.findOne({ phone: normalizedPhone });
+
+        if (!userToAdd) {
+            return res.status(404).json({ msg: "לא נמצא משתמש עם הטלפון הזה" });
+        }
+
+        // 🔥🔥🔥 שדרוג אוטומטי לאדמין 🔥🔥🔥
+        // אם המשתמש הוא עדיין 'user' רגיל, נהפוך אותו ל-'admin' כי הוא הופך לעובד
+        if (userToAdd.role !== "admin") {
+            userToAdd.role = "admin";
+            await userToAdd.save();
+            console.log(`User ${userToAdd._id} auto-upgraded to admin upon being added as worker.`);
+        }
+
+        const biz = await BusinessModel.findById(businessId);
+        if (!biz) return res.status(404).json({ msg: "Business not found" });
+
+        // בדיקה שהוא לא הבעלים
+        if (biz.owner.toString() === userToAdd._id.toString()) {
+            return res.status(400).json({ msg: "המשתמש הוא כבר הבעלים של העסק" });
+        }
+
+        // בדיקה שהוא לא כבר עובד
+        const isAlreadyWorker = biz.workers.some(
+            (wId) => wId.toString() === userToAdd._id.toString()
+        );
+
+        if (isAlreadyWorker) {
+            return res.status(400).json({ msg: "המשתמש כבר קיים ברשימת העובדים" });
+        }
+
+        // הוספה לרשימת העובדים
+        biz.workers.push(userToAdd._id);
+        await biz.save();
+
+        const updated = await BusinessModel.findById(businessId)
+            .populate("workers", "_id name phone avatarUrl")
+            .populate("owner", "_id name phone avatarUrl");
+
+        res.json({ msg: "העובד נוסף בהצלחה (ושודרג לאדמין)", business: updated });
+
+    } catch (err) {
+        console.error("POST /:id/workers error:", err);
+        res.status(500).json({ msg: "Server error", error: err.message });
+    }
+});
+/* ======================================================
+   🗑 REMOVE WORKER
+====================================================== */
+router.delete("/:id/workers/:workerId", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const workerId = (req.params.workerId ?? "").trim();
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId))
+            return res.status(400).json({ msg: "Invalid business id" });
+
+        if (business && business !== businessId)
+            return res.status(403).json({ msg: "Wrong business" });
+
+        const updated = await BusinessModel.findByIdAndUpdate(
+            businessId,
+            { $pull: { workers: workerId } },
+            { new: true }
+        )
+            .populate("workers", "_id name phone avatarUrl")
+            .populate("owner", "_id name phone avatarUrl");
+
+        if (!updated) return res.status(404).json({ msg: "Business not found" });
+
+        res.json({ msg: "Worker removed", business: updated });
+    } catch (err) {
+        console.error("DELETE /:id/workers error:", err);
+        res.status(500).json({ msg: "Server error", error: err.message });
+    }
+});
+
 module.exports = router;

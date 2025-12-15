@@ -35,12 +35,6 @@ router.get("/", async (req, res) => {
 /* ======================================================
    📅 GET BLOCKS BY DAY (למסך קביעת תור)
    GET /blocks/by-day?date=YYYY-MM-DD&worker=xxxxx
-
-   מחזיר:
-   - בלוקים של כל העסק (resource = null)
-   - ואם נשלח worker תקין – גם בלוקים של אותו worker
-   - רק active=true
-   - רק בלוקים שחופפים ליום המבוקש
 ====================================================== */
 router.get("/by-day", auth, async (req, res) => {
     try {
@@ -67,22 +61,18 @@ router.get("/by-day", auth, async (req, res) => {
         }
 
         const dayEnd = new Date(dayStart);
-        dayEnd.setDate(dayEnd.getDate() + 1); // סוף היום
+        dayEnd.setDate(dayEnd.getDate() + 1);
 
         const filter = {
             business,
             active: true,
-            // כל בלוק שחופף ליום:
-            // start < dayEnd && end > dayStart
             start: { $lt: dayEnd },
             end: { $gt: dayStart },
         };
 
         if (worker && mongoose.Types.ObjectId.isValid(worker)) {
-            // גם בלוקים לכל העסק וגם לאיש צוות ספציפי
             filter.$or = [{ resource: null }, { resource: worker }];
         } else {
-            // אם לא עבר worker – נחזיר רק חסימות כלליות של העסק
             filter.resource = null;
         }
 
@@ -96,7 +86,14 @@ router.get("/by-day", auth, async (req, res) => {
 
 /* ======================================================
    📜 GET BLOCKS LIST (לניהול בצד אדמין)
-   GET /blocks/list?resource=...&from=2025-01-01&to=2025-01-31&includeInactive=true
+   GET /blocks/list?resource=...&worker=...&from=...&to=...&includeInactive=true
+
+   resource:
+   - אם תשלח resource=24hex => יחזיר רק חסימות של אותו עובד
+   - resource=null => רק חסימות כלליות של העסק
+
+   worker (חדש):
+   - אם תשלח worker=24hex => יחזיר גם חסימות כלליות (null) וגם של העובד
 ====================================================== */
 router.get("/list", auth, async (req, res) => {
     try {
@@ -107,19 +104,9 @@ router.get("/list", auth, async (req, res) => {
                 .json({ msg: "No business in token – cannot load blocks" });
         }
 
-        const { resource, from, to, includeInactive } = req.query;
+        const { resource, worker, from, to, includeInactive } = req.query;
 
         const filter = { business };
-
-        // סינון לפי משאב (עובד)
-        if (resource) {
-            if (resource === "null") {
-                // רק בלוקים של "כל העסק"
-                filter.resource = null;
-            } else if (mongoose.Types.ObjectId.isValid(resource)) {
-                filter.resource = resource;
-            }
-        }
 
         // ברירת מחדל – להחזיר רק active
         if (!includeInactive || includeInactive === "false") {
@@ -129,14 +116,25 @@ router.get("/list", auth, async (req, res) => {
         // טווח תאריכים (אופציונלי) לפי start
         if (from || to) {
             filter.start = {};
-            if (from) {
-                filter.start.$gte = new Date(from);
-            }
+            if (from) filter.start.$gte = new Date(from);
             if (to) {
-                // נוסיף יום קדימה שלא נפספס את סוף היום
                 const endDate = new Date(to);
                 endDate.setDate(endDate.getDate() + 1);
                 filter.start.$lt = endDate;
+            }
+        }
+
+        // --- NEW: worker => גם null וגם אותו worker ---
+        if (worker && mongoose.Types.ObjectId.isValid(worker)) {
+            filter.$or = [{ resource: null }, { resource: worker }];
+        } else {
+            // --- existing: resource filter (exact or null) ---
+            if (resource) {
+                if (resource === "null") {
+                    filter.resource = null;
+                } else if (mongoose.Types.ObjectId.isValid(resource)) {
+                    filter.resource = resource;
+                }
             }
         }
 
@@ -151,8 +149,6 @@ router.get("/list", auth, async (req, res) => {
 /* ======================================================
    ➕ CREATE BLOCK
    POST /blocks
-   body: { resource?, start, end, timezone?, reason?, notes? }
-   business ו-createdBy נלקחים מה-token
 ====================================================== */
 router.post("/", authAdmin, async (req, res) => {
     try {
@@ -164,7 +160,6 @@ router.post("/", authAdmin, async (req, res) => {
                 .json({ msg: "No business in token – cannot create block" });
         }
 
-        // נדרוס business + createdBy מה-token, שלא יוכלו לזייף
         const payload = {
             ...req.body,
             business,
@@ -190,7 +185,6 @@ router.post("/", authAdmin, async (req, res) => {
 
 /* ======================================================
    ✏️ UPDATE BLOCK
-   PATCH /blocks/:id
 ====================================================== */
 router.patch("/:id", authAdmin, async (req, res) => {
     try {
@@ -231,7 +225,6 @@ router.patch("/:id", authAdmin, async (req, res) => {
 
 /* ======================================================
    🗑 DELETE BLOCK (Soft delete – active=false)
-   DELETE /blocks/:id
 ====================================================== */
 router.delete("/:id", authAdmin, async (req, res) => {
     try {
