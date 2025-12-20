@@ -1,6 +1,10 @@
 const express = require("express");
 require("dotenv").config();   // 👈 חייב להיות כאן!
 
+console.log("ENV CHECK JWT_SECRET?", Boolean(process.env.JWT_SECRET));
+console.log("ENV CHECK TOKENSECRET?", Boolean(process.env.TOKENSECRET));
+
+
 const http = require("http");
 const path = require("path");
 const { routesInit } = require("./routes/configRoutes");

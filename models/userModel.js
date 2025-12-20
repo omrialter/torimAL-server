@@ -1,76 +1,62 @@
+// models/userModel.js
 const mongoose = require("mongoose");
 const Joi = require("joi");
 const jwt = require("jsonwebtoken");
-const { config } = require("../config/secret");
 
-const userSchema = new mongoose.Schema({
-    business: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "businesses",
-        required: true
-    },
-    phone: {
-        type: String,
-        required: true,
-    },
-    name: {
-        type: String,
-        default: ""
-    },
-    role: {
-        type: String,
-        enum: ["user", "admin"],
-        default: "user"
-    },
-    expoPushToken: {
-        type: String,
-        default: null,
-    },
-    date_created: {
-        type: Date,
-        default: Date.now
-    }
-});
-
-// 1) טלפון ייחודי בתוך אותו עסק (user או admin)
-userSchema.index({ business: 1, phone: 1 }, { unique: true });
-
-// 2) אותו טלפון לא יכול להיות admin בשני עסקים שונים
-userSchema.index(
-    { phone: 1 },
+const userSchema = new mongoose.Schema(
     {
-        unique: true,
-        partialFilterExpression: { role: "admin" }
-    }
+        name: { type: String, trim: true, required: true },
+        phone: { type: String, trim: true, required: true },
+        business: { type: mongoose.Schema.Types.ObjectId, ref: "business", required: true },
+
+        // user / admin / worker וכו'
+        role: { type: String, default: "user" },
+
+        // Expo push token (לכל מכשיר יכול להיות token אחר; אצלך זה נשמר פר משתמש)
+        expoPushToken: { type: String, default: null },
+
+        // ✅ הגדרות Push לאדמינים (פר-אדמין)
+        adminPushSettings: {
+            enabled: { type: Boolean, default: true },
+            onAppointmentCreated: { type: Boolean, default: true },
+            onAppointmentCanceled: { type: Boolean, default: true },
+            onUserSignup: { type: Boolean, default: true },
+        },
+    },
+    { timestamps: true }
 );
 
-exports.UserModel = mongoose.model("users", userSchema);
+// רצוי (אם אין לך כבר): אינדקס למנוע כפילויות באותו עסק
+userSchema.index({ phone: 1, business: 1 }, { unique: true });
 
-exports.createToken = (user_id, role, businessId) => {
-    const token = jwt.sign(
-        { _id: user_id, role: role, business: businessId },
-        config.tokenSecret,
-        { expiresIn: "2d" }
+const UserModel = mongoose.model("users", userSchema);
+
+// אם כבר יש לך SECRET אצלך ב-env, תשאיר את זה כמו אצלך
+function createToken(_id, role, business) {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) throw new Error("Missing JWT_SECRET");
+
+    return jwt.sign(
+        { _id: String(_id), role, business: String(business) },
+        secret,
+        { expiresIn: "365d" }
     );
-    return token;
-};
+}
 
-exports.validateUser = (_reqBody) => {
-    let joiSchema = Joi.object({
-        business: Joi.string().hex().length(24).required(),
-        name: Joi.string().min(2).max(200).required(),
-        phone: Joi.string()
-            .pattern(/^05\d{8}$/)
-            .required()
+// (אופציונלי) ולידציה בסיסית אם אתה משתמש בזה במקומות אחרים
+function validateUser(payload) {
+    const schema = Joi.object({
+        name: Joi.string().min(1).max(200).required(),
+        phone: Joi.string().min(5).max(30).required(),
+        business: Joi.string().required(),
+        role: Joi.string().valid("user", "admin", "worker").optional(),
     });
-    return joiSchema.validate(_reqBody);
-};
 
-exports.validatePhoneOnly = (_reqBody) => {
-    const joiSchema = Joi.object({
-        phone: Joi.string()
-            .pattern(/^05\d{8}$/)
-            .required()
-    });
-    return joiSchema.validate(_reqBody);
+    return schema.validate(payload);
+}
+
+module.exports = {
+    UserModel,
+    createToken,
+    validateUser,
 };
