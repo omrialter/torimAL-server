@@ -3,6 +3,25 @@ const mongoose = require("mongoose");
 const Joi = require("joi");
 const jwt = require("jsonwebtoken");
 
+// ברירות מחדל להתראות אדמין
+const ADMIN_PUSH_DEFAULTS = {
+    enabled: true,
+    onAppointmentCreated: true,
+    onAppointmentCanceled: true,
+    onUserSignup: true,
+};
+
+// סכמה פנימית (בלי _id)
+const adminPushSettingsSchema = new mongoose.Schema(
+    {
+        enabled: { type: Boolean, default: true },
+        onAppointmentCreated: { type: Boolean, default: true },
+        onAppointmentCanceled: { type: Boolean, default: true },
+        onUserSignup: { type: Boolean, default: true },
+    },
+    { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
     {
         name: { type: String, trim: true, required: true },
@@ -12,26 +31,74 @@ const userSchema = new mongoose.Schema(
         // user / admin / worker וכו'
         role: { type: String, default: "user" },
 
-        // Expo push token (לכל מכשיר יכול להיות token אחר; אצלך זה נשמר פר משתמש)
+        // Expo push token
         expoPushToken: { type: String, default: null },
 
-        // ✅ הגדרות Push לאדמינים (פר-אדמין)
+        /**
+         * ✅ הגדרות Push לאדמינים (פר-אדמין)
+         * חשוב: לא לשים default ברמת השדה, כדי שלא יווצר לכל יוזר חדש.
+         * ניצור רק כש-role הוא admin.
+         */
         adminPushSettings: {
-            enabled: { type: Boolean, default: true },
-            onAppointmentCreated: { type: Boolean, default: true },
-            onAppointmentCanceled: { type: Boolean, default: true },
-            onUserSignup: { type: Boolean, default: true },
+            type: adminPushSettingsSchema,
+            default: undefined, // 👈 מונע יצירה אוטומטית לכל משתמש
         },
     },
     { timestamps: true }
 );
 
-// רצוי (אם אין לך כבר): אינדקס למנוע כפילויות באותו עסק
+// אינדקס למנוע כפילויות באותו עסק
 userSchema.index({ phone: 1, business: 1 }, { unique: true });
+
+/**
+ * create/save: אם זה אדמין ואין עדיין adminPushSettings, ניצור ברירות מחדל
+ */
+userSchema.pre("save", function (next) {
+    if (this.role === "admin" && !this.adminPushSettings) {
+        this.adminPushSettings = { ...ADMIN_PUSH_DEFAULTS };
+    }
+
+    // אם זה לא admin — נשאיר undefined (לא יהיה שדה במסמך)
+    if (this.role !== "admin") {
+        this.adminPushSettings = undefined;
+    }
+
+    next();
+});
+
+/**
+ * updateOne/findOneAndUpdate/updateMany:
+ * אם משנים role ל-admin ולא נשלח adminPushSettings במפורש — נייצר ברירת מחדל.
+ */
+userSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function (next) {
+    const update = this.getUpdate() || {};
+
+    const $set = update.$set || {};
+    const nextRole = $set.role ?? update.role;
+
+    if (nextRole === "admin") {
+        const adminSettingsProvided =
+            Object.prototype.hasOwnProperty.call($set, "adminPushSettings") ||
+            Object.prototype.hasOwnProperty.call(update, "adminPushSettings") ||
+            Object.keys($set).some((k) => k.startsWith("adminPushSettings."));
+
+        if (!adminSettingsProvided) {
+            update.$set = {
+                ...$set,
+                adminPushSettings: { ...ADMIN_PUSH_DEFAULTS },
+            };
+            this.setUpdate(update);
+        }
+    }
+
+    // אם מעדכנים role ל-user/worker ורוצים לוודא שהשדה יוסר:
+    // לא נוגעים אוטומטית כאן כדי לא להפתיע ב-updates כלליים,
+    // אבל אם תרצה אפשר להוסיף ל-route שמחליף role גם $unset.
+    next();
+});
 
 const UserModel = mongoose.model("users", userSchema);
 
-// אם כבר יש לך SECRET אצלך ב-env, תשאיר את זה כמו אצלך
 function createToken(_id, role, business) {
     const secret = process.env.JWT_SECRET;
     if (!secret) throw new Error("Missing JWT_SECRET");
@@ -43,7 +110,6 @@ function createToken(_id, role, business) {
     );
 }
 
-// (אופציונלי) ולידציה בסיסית אם אתה משתמש בזה במקומות אחרים
 function validateUser(payload) {
     const schema = Joi.object({
         name: Joi.string().min(1).max(200).required(),

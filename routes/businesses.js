@@ -3,6 +3,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const Joi = require("joi");
 const { BusinessModel, validateBusiness } = require("../models/businessModel.js");
+const { UserModel } = require("../models/userModel");
+const { AppointmentModel } = require("../models/appointmentModel");
 const { auth, authAdmin } = require("../auth/auth.js");
 const cloudinary = require("cloudinary").v2;
 const streamifier = require("streamifier");
@@ -226,6 +228,92 @@ router.get("/businessInfo/:id", auth, async (req, res) => {
         res.json(doc);
     } catch (err) {
         console.error("GET /businessInfo error:", err);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+/* ======================================================
+   📊 GET BUSINESS STATISTICS (מעודכן ל-No Show)
+====================================================== */
+router.get("/:id/stats", authAdmin, async (req, res) => {
+    try {
+        const businessId = (req.params.id ?? "").trim();
+        const { business } = req.tokenData;
+
+        if (!mongoose.Types.ObjectId.isValid(businessId)) {
+            return res.status(400).json({ error: "Invalid business id" });
+        }
+        if (business && business !== businessId) {
+            return res.status(403).json({ error: "Access denied" });
+        }
+
+        const now = new Date();
+        const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const threeMonthsAgo = new Date();
+        threeMonthsAgo.setMonth(now.getMonth() - 3);
+
+        const [
+            totalClients,
+            completedThisMonth,
+            noShowThisMonth, // שונה מ-canceled
+            completedLastMonth,
+            noShowLastMonth, // שונה מ-canceled
+            activeUsersLast3Months
+        ] = await Promise.all([
+            // 1. סה"כ לקוחות
+            UserModel.countDocuments({ business: businessId, role: "user" }),
+
+            // 2. הושלמו החודש
+            AppointmentModel.countDocuments({
+                business: businessId,
+                status: "completed",
+                start: { $gte: startOfCurrentMonth }
+            }),
+
+            // 3. הברזות החודש (שונה מ-canceled ל-no_show)
+            AppointmentModel.countDocuments({
+                business: businessId,
+                status: "no_show",
+                start: { $gte: startOfCurrentMonth }
+            }),
+
+            // 4. הושלמו חודש שעבר
+            AppointmentModel.countDocuments({
+                business: businessId,
+                status: "completed",
+                start: { $gte: startOfLastMonth, $lt: startOfCurrentMonth }
+            }),
+
+            // 5. הברזות חודש שעבר (שונה מ-canceled ל-no_show)
+            AppointmentModel.countDocuments({
+                business: businessId,
+                status: "no_show",
+                start: { $gte: startOfLastMonth, $lt: startOfCurrentMonth }
+            }),
+
+            // 6. משתמשים פעילים
+            AppointmentModel.distinct("client", {
+                business: businessId,
+                start: { $gte: threeMonthsAgo },
+                status: { $ne: "canceled" }
+            })
+        ]);
+
+        const activeCount = activeUsersLast3Months.length;
+        const inactiveUsers = Math.max(0, totalClients - activeCount);
+
+        res.json({
+            totalClients,
+            completedThisMonth,
+            noShowThisMonth, // שם משתנה חדש
+            completedLastMonth,
+            noShowLastMonth, // שם משתנה חדש
+            inactiveUsers,
+        });
+
+    } catch (err) {
+        console.error("GET /:id/stats error:", err);
         res.status(500).json({ error: "Server error" });
     }
 });

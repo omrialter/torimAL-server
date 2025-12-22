@@ -191,6 +191,109 @@ router.get("/admin-stats", authAdmin, async (req, res) => {
     }
 });
 
+
+/**
+ * GET /appointments/nearest-slots
+ * חיפוש 5 התורים הפנויים הקרובים ביותר
+ */
+router.get("/nearest-slots", auth, async (req, res) => {
+    try {
+        const { business } = req.tokenData;
+        const { worker, duration } = req.query;
+
+        // ולידציות בסיסיות
+        if (!isValidObjectId(business) || !isValidObjectId(worker)) {
+            return res.status(400).json({ error: "Invalid IDs" });
+        }
+
+        const serviceDurationMin = parseInt(duration) || 30; // ברירת מחדל 30 דקות
+        const neededMs = minutesToMs(serviceDurationMin);
+
+        // הגדרות עבודה (בפועל - לשלוף מה-BusinessModel)
+        const WORK_START_HOUR = 8;
+        const WORK_END_HOUR = 20;
+        const SLOT_INTERVAL_MIN = 20; // קפיצות של 20 דקות בחיפוש
+
+        let foundSlots = [];
+        let dateIterator = new Date(); // מתחילים מעכשיו
+
+        // אם עכשיו אחרי שעות העבודה, נתחיל ממחר בבוקר
+        if (dateIterator.getHours() >= WORK_END_HOUR) {
+            dateIterator.setDate(dateIterator.getDate() + 1);
+            dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
+        }
+
+        // הגנה: לא לחפש יותר מ-14 יום קדימה כדי לא להיתקע בלולאה
+        let daysChecked = 0;
+
+        while (foundSlots.length < 5 && daysChecked < 14) {
+
+            // 1. הגדרת טווח החיפוש לאותו יום ספציפי
+            let dayStart = new Date(dateIterator);
+            if (dayStart.getHours() < WORK_START_HOUR) {
+                dayStart.setHours(WORK_START_HOUR, 0, 0, 0);
+            }
+
+            let dayEnd = new Date(dateIterator);
+            dayEnd.setHours(WORK_END_HOUR, 0, 0, 0);
+
+            // אם כבר עברנו את סוף היום הנוכחי, נדלג ליום הבא
+            if (dayStart >= dayEnd) {
+                dateIterator.setDate(dateIterator.getDate() + 1);
+                dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
+                daysChecked++;
+                continue;
+            }
+
+            // 2. שליפת כל התורים הקיימים לאותו יום
+            // אופטימיזציה: שולפים רק את ה-start וה-duration
+            const appointmentsToday = await AppointmentModel.find({
+                business,
+                worker,
+                status: { $in: BLOCKING_STATUSES },
+                start: { $gte: dayStart, $lt: dayEnd }
+            }).select('start service.duration').lean();
+
+            // 3. לולאה פנימית על השעות ביום
+            let currentSlot = new Date(dayStart);
+
+            while (currentSlot < dayEnd && foundSlots.length < 5) {
+                const slotEnd = new Date(currentSlot.getTime() + neededMs);
+
+                // אם התור חורג משעות הפעילות
+                if (slotEnd > dayEnd) break;
+
+                // בדיקת התנגשות
+                const isTaken = appointmentsToday.some(appt => {
+                    const apptStart = new Date(appt.start);
+                    const apptEnd = new Date(apptStart.getTime() + minutesToMs(appt.service.duration));
+
+                    // בדיקת חפיפה קלאסית
+                    return (currentSlot < apptEnd && slotEnd > apptStart);
+                });
+
+                if (!isTaken) {
+                    foundSlots.push(new Date(currentSlot)); // מצאנו תור!
+                }
+
+                // מתקדמים ב-30 דקות (או כל אינטרוול שתבחר)
+                currentSlot = new Date(currentSlot.getTime() + minutesToMs(SLOT_INTERVAL_MIN));
+            }
+
+            // קידום ליום הבא
+            dateIterator.setDate(dateIterator.getDate() + 1);
+            dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
+            daysChecked++;
+        }
+
+        return res.json({ slots: foundSlots });
+
+    } catch (err) {
+        console.error("Error finding nearest slots:", err);
+        return res.status(500).json({ error: "Server error" });
+    }
+});
+
 /**
  * POST /appointments
  * יצירת תור
