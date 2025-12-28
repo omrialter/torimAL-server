@@ -1,18 +1,17 @@
-// models/businessModel.js
 const mongoose = require("mongoose");
 const Joi = require("joi");
 
-const defaultOpeningHours = {
+const DEFAULT_OPENING_HOURS = {
     sunday: { open: "09:00", close: "17:00" },
     monday: { open: "09:00", close: "17:00" },
     tuesday: { open: "09:00", close: "17:00" },
     wednesday: { open: "09:00", close: "17:00" },
     thursday: { open: "09:00", close: "17:00" },
     friday: { open: "09:00", close: "13:00" },
-    saturday: { open: null, close: null }, // סגור
+    saturday: { open: null, close: null }, // Closed
 };
 
-// 👇 סכמה לשירותים – בלי _id; מונגוס ייצור ObjectId אוטומטי
+// Service Sub-schema (No explicit _id required, Mongoose adds it automatically)
 const serviceSchema = new mongoose.Schema({
     name: {
         type: String,
@@ -20,7 +19,7 @@ const serviceSchema = new mongoose.Schema({
         trim: true,
     },
     duration: {
-        type: Number, // בדקות
+        type: Number, // in minutes
         required: true,
         min: 1,
         max: 480,
@@ -34,30 +33,18 @@ const serviceSchema = new mongoose.Schema({
 
 const businessSchema = new mongoose.Schema({
     name: { type: String, required: true, trim: true },
+    phone: { type: String, default: "" },
+    email: { type: String, default: "" },
+    address: { type: String, default: "" },
 
-    phone: {
-        type: String,
-        default: "",
-    },
-
-    email: {
-        type: String,
-        default: "",
-    },
-
-    address: {
-        type: String,
-        default: "",
-    },
-
-    // 👇 בעל העסק – ObjectId ל-User, חובה
+    // Business Owner (Reference to User)
     owner: {
         type: mongoose.Schema.Types.ObjectId,
         ref: "users",
-        required: true,
+
     },
 
-    // 👇 עובדים – מערך ObjectId ל-User, נוכל לפופלייט
+    // Workers List (Array of User References)
     workers: [
         {
             type: mongoose.Schema.Types.ObjectId,
@@ -65,49 +52,32 @@ const businessSchema = new mongoose.Schema({
         },
     ],
 
-    // גלריית עבודות
+    // Image Gallery
     portfolio: {
         type: [String],
         default: () => [],
     },
 
-    // באנר ראשי (וידאו או תמונה)
-    banner: {
-        type: String,
-        default: "",
-    },
+    // Main Banner (Image or Video)
+    banner: { type: String, default: "" },
 
-    // באנר 2 – תמונה
-    banner2: {
-        type: String,
-        default: "",
-    },
+    // Secondary Banners (Images)
+    banner2: { type: String, default: "" },
+    banner3: { type: String, default: "" },
 
-    // באנר 3 – תמונה
-    banner3: {
-        type: String,
-        default: "",
-    },
+    // Pop-up Message text
+    message: { type: String, default: "" },
 
-    // טקסט הודעה קופצת
-    message: {
-        type: String,
-        default: "",
-    },
+    // "About Us" text
+    aboutUs: { type: String, default: "" },
 
-    // טקסט "קצת עלינו"
-    aboutUs: {
-        type: String,
-        default: "",
-    },
-
-    // 👇 services – כל שירות יקבל ObjectId אוטומטי
+    // List of Services
     services: {
         type: [serviceSchema],
         default: () => [],
     },
 
-    // 🎨 צבעים של העסק – 3 סטרינגים (primary, secondary, third)
+    // Brand Colors (Primary, Secondary, Third)
     business_colors: {
         primary: { type: String, default: "#111" },
         secondary: { type: String, default: "#f3f4f6" },
@@ -116,7 +86,7 @@ const businessSchema = new mongoose.Schema({
 
     openingHours: {
         type: Object,
-        default: () => ({ ...defaultOpeningHours }),
+        default: () => ({ ...DEFAULT_OPENING_HOURS }),
     },
 
     createdAt: { type: Date, default: Date.now },
@@ -124,8 +94,11 @@ const businessSchema = new mongoose.Schema({
 
 exports.BusinessModel = mongoose.model("businesses", businessSchema);
 
-// ולווידציה של יצירת עסק (POST /businesses)
-exports.validateBusiness = (_reqBody) => {
+// ---------------------------------------------------------
+// Joi Validation (for Business Creation)
+// ---------------------------------------------------------
+
+exports.validateBusiness = (reqBody) => {
     const timeRange = Joi.object({
         open: Joi.string()
             .allow(null)
@@ -143,30 +116,27 @@ exports.validateBusiness = (_reqBody) => {
         email: Joi.string().max(200).email().required(),
         address: Joi.string().max(300),
 
-        // באנרים + טקסטים – אופציונלי
+        // Optional Media & Texts
         banner: Joi.string().uri().allow(""),
         banner2: Joi.string().uri().allow(""),
         banner3: Joi.string().uri().allow(""),
         message: Joi.string().max(4000).allow(""),
         aboutUs: Joi.string().max(8000).allow(""),
 
-        // גלריה
         portfolio: Joi.array().items(Joi.string().uri()),
 
-        // 🎨 אם שולחים business_colors – כל שלושת השדות חובה
+        // Colors
         business_colors: Joi.object({
             primary: Joi.string().max(20).required(),
             secondary: Joi.string().max(20).required(),
             third: Joi.string().max(20).required(),
         }).optional(),
 
-        // 👇 owner חובה – אי אפשר עסק בלי owner
-        owner: Joi.string().hex().length(24).required(),
-
+        // References
+        owner: Joi.string().hex().length(24),
         workers: Joi.array().items(Joi.string().hex().length(24)),
 
-
-        // 👇 שירותים – בלי _id, רק name/duration/price
+        // Services Definition
         services: Joi.array().items(
             Joi.object({
                 name: Joi.string().min(1).max(100).required(),
@@ -186,5 +156,5 @@ exports.validateBusiness = (_reqBody) => {
         }).optional(),
     });
 
-    return joiSchema.validate(_reqBody);
+    return joiSchema.validate(reqBody);
 };

@@ -1,20 +1,36 @@
 const express = require("express");
-const mongoose = require("mongoose"); // 👈 הוספתי לצורך בדיקת ObjectId
-const { UserModel, createToken } = require("../models/userModel");
+const mongoose = require("mongoose");
+const crypto = require("crypto");
+const Joi = require("joi");
 const router = express.Router();
+
+// Internal Imports
+const { UserModel, createToken } = require("../models/userModel");
+const { NotificationModel } = require("../models/notificationModel");
 const admin = require("../services/firebase.js");
 const { auth, authAdmin } = require("../auth/auth.js");
 const { toE164IL } = require("../services/utils_phone.js");
 const { sendPushToToken, sendPushToManyTokens } = require("../services/pushService");
 
-// -------------------------
-// Helper: Validate ObjectId
-// -------------------------
+// ---------------------------------------------------------
+// Validation Schemas & Helpers
+// ---------------------------------------------------------
+
+const pushSchema = Joi.object({
+    title: Joi.string().trim().min(1).max(80).required(),
+    body: Joi.string().trim().min(1).max(180).required(),
+    data: Joi.object().unknown(true).default({}),
+});
+
+/**
+ * Checks if a string is a valid MongoDB ObjectId
+ */
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-// -------------------------
-// Admin Push Notify Helper
-// -------------------------
+/**
+ * Helper: Notify all admins of a business about specific events.
+ * Filters admins based on their specific notification preferences.
+ */
 async function notifyAdmins(businessId, eventType, title, body, data = {}) {
     try {
         const settingKeyByEvent = {
@@ -23,9 +39,10 @@ async function notifyAdmins(businessId, eventType, title, body, data = {}) {
             user_signup: "onUserSignup",
         };
 
-        const key = settingKeyByEvent[eventType];
-        if (!key) return { ok: false, error: "Unknown eventType" };
+        const settingKey = settingKeyByEvent[eventType];
+        if (!settingKey) return { ok: false, error: "Unknown eventType" };
 
+        // Find admins who have push enabled globally
         const admins = await UserModel.find({
             business: businessId,
             role: "admin",
@@ -33,19 +50,19 @@ async function notifyAdmins(businessId, eventType, title, body, data = {}) {
             "adminPushSettings.enabled": { $ne: false },
         }).select("expoPushToken adminPushSettings");
 
-        const tokens = Array.from(
-            new Set(
-                admins
-                    .filter((a) => a.adminPushSettings?.[key] !== false)
-                    .map((a) => a.expoPushToken)
-                    .filter((t) => typeof t === "string" && t.trim().length > 0)
-                    .map((t) => t.trim())
-            )
-        );
+        // Filter tokens based on the specific event setting
+        const tokens = admins
+            .filter((admin) => admin.adminPushSettings?.[settingKey] !== false) // Check specific setting
+            .map((admin) => admin.expoPushToken)
+            .filter((t) => typeof t === "string" && t.trim().length > 0) // Validate token string
+            .map((t) => t.trim()); // Clean whitespace
 
-        if (tokens.length === 0) return { ok: true, sent: 0 };
+        // Remove duplicates
+        const uniqueTokens = [...new Set(tokens)];
 
-        return await sendPushToManyTokens(tokens, title, body, {
+        if (uniqueTokens.length === 0) return { ok: true, sent: 0 };
+
+        return await sendPushToManyTokens(uniqueTokens, title, body, {
             ...data,
             type: "admin_event",
             eventType,
@@ -58,37 +75,43 @@ async function notifyAdmins(businessId, eventType, title, body, data = {}) {
     }
 }
 
-// -------------------------
-// CHECK TOKEN
-// -------------------------
+// ---------------------------------------------------------
+// Routes
+// ---------------------------------------------------------
+
+/**
+ * GET /checkToken
+ * valid user token check
+ */
 router.get("/checkToken", auth, async (req, res) => {
     res.json({ _id: req.tokenData._id, role: req.tokenData.role });
 });
 
-// -------------------------
-// USER INFO
-// -------------------------
+/**
+ * GET /userInfo
+ * Returns current user profile
+ */
 router.get("/userInfo", auth, async (req, res) => {
     try {
-        // 🛡️ Security: הוספתי סינון לפי business כדי להבטיח שהמשתמש שייך לעסק שבטוקן
+        // 🛡️ Security: Ensure user belongs to the token's business
         const user = await UserModel.findOne({
             _id: req.tokenData._id,
-            business: req.tokenData.business
+            business: req.tokenData.business,
         }).lean();
 
-        if (!user) return res.sendStatus(401); // User might be deleted
+        if (!user) return res.sendStatus(401); // User might have been deleted
 
         res.json(user);
     } catch (err) {
         console.error("userInfo error:", err);
-        // 🛡️ Security: לא מחזירים את err לקלינט
         res.status(502).json({ error: "Server error" });
     }
 });
 
-// -------------------------
-// SIGNUP (phone comes ONLY from Firebase)
-// -------------------------
+/**
+ * POST /signup
+ * Creates a new user (Phone verification via Firebase)
+ */
 router.post("/signup", async (req, res) => {
     const { idToken, name, businessId } = req.body;
 
@@ -96,21 +119,23 @@ router.post("/signup", async (req, res) => {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 🛡️ Validation: בדיקה שזה מזהה תקין
     if (!isValidId(businessId)) {
         return res.status(400).json({ error: "Invalid business ID format" });
     }
 
     try {
+        // Verify Firebase Token
         const decoded = await admin.auth().verifyIdToken(idToken);
         let phone = decoded.phone_number;
         if (!phone) return res.status(400).json({ error: "Invalid phone number in token" });
 
         phone = toE164IL(phone);
 
+        // Check if user exists in THIS business
         const existing = await UserModel.findOne({ phone, business: businessId });
         if (existing) return res.status(400).json({ error: "User already exists" });
 
+        // Create User
         const newUser = await UserModel.create({
             name,
             phone,
@@ -118,30 +143,31 @@ router.post("/signup", async (req, res) => {
             role: "user",
         });
 
-        // ✅ Push Notify (Fire & Forget)
+        // Notify Admins (Async - Fire & Forget)
         notifyAdmins(
             businessId,
             "user_signup",
-            "נרשם משתמש חדש",
-            `${name} נרשם למערכת`,
+            "New User Signup",
+            `${name} has joined the system`,
             { userId: String(newUser._id) }
-        ).catch(err => console.error("Signup push failed:", err));
+        ).catch((err) => console.error("Signup push failed:", err));
 
+        // Generate JWT
         const token = createToken(newUser._id, newUser.role, businessId);
         return res.json({ token, user: newUser });
     } catch (err) {
         console.error("Signup error:", err);
-        // 🛡️ Security: הסתרת פרטים טכניים אם זו שגיאת שרת
-        if (err.code && err.code.startsWith('auth/')) {
+        if (err.code && err.code.startsWith("auth/")) {
             return res.status(401).json({ error: "Invalid Firebase ID token" });
         }
         return res.status(500).json({ error: "Server error during signup" });
     }
 });
 
-// -------------------------
-// CHECK-PHONE
-// -------------------------
+/**
+ * POST /check-phone
+ * Checks if a phone number is already registered in a business
+ */
 router.post("/check-phone", async (req, res) => {
     let { phone, businessId } = req.body;
 
@@ -156,8 +182,8 @@ router.post("/check-phone", async (req, res) => {
     phone = toE164IL(phone);
 
     try {
-        const user = await UserModel.findOne({ phone, business: businessId }).select("_id"); // Select only ID for performance
-        if (!user) return res.status(404).json({ error: "User not found or not verified" });
+        const user = await UserModel.findOne({ phone, business: businessId }).select("_id");
+        if (!user) return res.status(404).json({ error: "User not found" });
 
         return res.json({ ok: true });
     } catch (err) {
@@ -166,9 +192,10 @@ router.post("/check-phone", async (req, res) => {
     }
 });
 
-// -------------------------
-// VERIFY (LOGIN)
-// -------------------------
+/**
+ * POST /verify
+ * Login: Verifies Firebase Token -> Returns App JWT
+ */
 router.post("/verify", async (req, res) => {
     try {
         const { idToken, businessId } = req.body;
@@ -181,7 +208,7 @@ router.post("/verify", async (req, res) => {
             return res.status(400).json({ error: "Invalid business ID format" });
         }
 
-        // 1) אימות Firebase
+        // 1. Verify with Firebase
         let decoded;
         try {
             decoded = await admin.auth().verifyIdToken(idToken);
@@ -195,15 +222,15 @@ router.post("/verify", async (req, res) => {
 
         phone = toE164IL(phone);
 
+        // 2. Find User in DB
         const user = await UserModel.findOne({ phone, business: businessId }).lean();
         if (!user) {
             return res.status(404).json({ error: "User not found for this business" });
         }
 
-        // 3) יצירת JWT שלנו
+        // 3. Issue JWT
         const token = createToken(user._id, user.role, String(businessId));
         return res.json({ token, user });
-
     } catch (err) {
         console.error("Verify server error:", err);
         return res.status(500).json({ error: "Server error" });
@@ -212,7 +239,7 @@ router.post("/verify", async (req, res) => {
 
 /**
  * POST /users/me/push-token
- * שומר את Expo Push Token של המשתמש המחובר
+ * Updates the Expo Push Token for the current user
  */
 router.post("/me/push-token", auth, async (req, res) => {
     try {
@@ -222,7 +249,7 @@ router.post("/me/push-token", auth, async (req, res) => {
             return res.status(400).json({ error: "expoPushToken is required" });
         }
 
-        // 🛡️ Security: מוודאים שהעדכון קורה רק לעסק הנוכחי
+        // 🛡️ Security: Update only for current user & business
         await UserModel.updateOne(
             { _id: req.tokenData._id, business: req.tokenData.business },
             { $set: { expoPushToken: expoPushToken.trim() } }
@@ -237,28 +264,23 @@ router.post("/me/push-token", auth, async (req, res) => {
 
 /**
  * POST /users/me/test-push
- * שולח למשתמש המחובר התראת בדיקה
+ * Sends a self-test notification
  */
 router.post("/me/test-push", auth, async (req, res) => {
     try {
-        // 🛡️ Security: וידוא עסק
         const user = await UserModel.findOne({
             _id: req.tokenData._id,
-            business: req.tokenData.business
+            business: req.tokenData.business,
         });
 
-        if (!user) {
-            return res.status(404).json({ error: "User not found" });
-        }
-
-        if (!user.expoPushToken) {
-            return res.status(400).json({ error: "User has no expoPushToken saved" });
+        if (!user || !user.expoPushToken) {
+            return res.status(400).json({ error: "User not found or missing push token" });
         }
 
         const result = await sendPushToToken(
             user.expoPushToken,
-            "בדיקת פוש",
-            "אם אתה רואה את זה – המערכת עובדת ✅",
+            "Test Notification",
+            "If you see this, the system works! ✅",
             { type: "test" }
         );
 
@@ -275,52 +297,55 @@ router.post("/me/test-push", auth, async (req, res) => {
 
 /**
  * POST /users/admin/push
- * אדמין שולח פוש לכל המשתמשים בעסק שלו
+ * Admin Broadcast: Send push to all users in the business
  */
 router.post("/admin/push", authAdmin, async (req, res) => {
     try {
-        const { business } = req.tokenData; // כבר מאומת ב-authAdmin שיש business
-        const { title, body, data } = req.body;
+        const { business } = req.tokenData;
 
-        if (!title || !body) {
-            return res.status(400).json({ error: "title and body are required" });
+        // Validate Input
+        const { value, error } = pushSchema.validate(req.body, { abortEarly: false });
+        if (error) {
+            return res.status(400).json({
+                error: "Invalid payload",
+                details: error.details.map((d) => d.message),
+            });
         }
 
-        const safeTitle = String(title).trim().slice(0, 80);
-        const safeBody = String(body).trim().slice(0, 180);
+        const { title, body, data } = value;
 
-        if (!safeTitle || !safeBody) {
-            return res.status(400).json({ error: "title/body cannot be empty" });
-        }
-
+        // Fetch Tokens
         const users = await UserModel.find({
             business,
             expoPushToken: { $exists: true, $ne: null },
         }).select("expoPushToken");
 
-        const tokens = Array.from(
-            new Set(
+        const tokens = [
+            ...new Set(
                 users
                     .map((u) => u.expoPushToken)
                     .filter((t) => typeof t === "string" && t.trim().length > 0)
                     .map((t) => t.trim())
-            )
-        );
+            ),
+        ];
 
         if (tokens.length === 0) {
-            return res.status(400).json({ error: "No users with expoPushToken in this business" });
+            return res.status(400).json({ error: "No users with push tokens found" });
         }
 
+        const campaignId = crypto.randomUUID();
         const payloadData = {
-            ...(typeof data === "object" && data ? data : {}),
+            ...(typeof data === "object" ? data : {}),
             type: "admin_broadcast",
             businessId: String(business),
+            campaignId,
             createdAt: new Date().toISOString(),
         };
 
-        const result = await sendPushToManyTokens(tokens, safeTitle, safeBody, payloadData);
+        // Send Broadcast
+        const result = await sendPushToManyTokens(tokens, title, body, payloadData);
 
-        // ניקוי טוקנים לא חוקיים
+        // Cleanup Invalid Tokens
         if (result?.invalidTokens?.length) {
             await UserModel.updateMany(
                 { business, expoPushToken: { $in: result.invalidTokens } },
@@ -328,9 +353,31 @@ router.post("/admin/push", authAdmin, async (req, res) => {
             );
         }
 
+        // Save Notification History
+        await NotificationModel.create({
+            business,
+            title,
+            body,
+            data: payloadData, // Save actual payload
+            type: "admin_broadcast",
+        });
+
+        // Cleanup Old History (Keep last 5)
+        const oldNotifications = await NotificationModel.find({ business })
+            .sort({ createdAt: -1 })
+            .skip(5)
+            .select("_id");
+
+        if (oldNotifications.length > 0) {
+            await NotificationModel.deleteMany({
+                _id: { $in: oldNotifications.map((doc) => doc._id) },
+            });
+        }
+
         res.json({
             ok: true,
             business,
+            campaignId,
             requestedTokens: tokens.length,
             ...result,
         });
@@ -342,14 +389,13 @@ router.post("/admin/push", authAdmin, async (req, res) => {
 
 /**
  * GET /users/admin/push-settings
- * מחזיר את ההגדרות של האדמין המחובר
+ * Fetch admin notification preferences
  */
 router.get("/admin/push-settings", authAdmin, async (req, res) => {
     try {
-        // 🛡️ Security: וידוא business ו-role
         const user = await UserModel.findOne({
             _id: req.tokenData._id,
-            business: req.tokenData.business
+            business: req.tokenData.business,
         })
             .select("adminPushSettings")
             .lean();
@@ -365,7 +411,7 @@ router.get("/admin/push-settings", authAdmin, async (req, res) => {
 
 /**
  * PATCH /users/admin/push-settings
- * body: { enabled?, onAppointmentCreated?, onAppointmentCanceled?, onUserSignup? }
+ * Update admin notification preferences
  */
 router.patch("/admin/push-settings", authAdmin, async (req, res) => {
     try {
@@ -382,12 +428,12 @@ router.patch("/admin/push-settings", authAdmin, async (req, res) => {
             return res.status(400).json({ error: "No valid boolean fields to update" });
         }
 
-        // 🛡️ Security: עדכון עם וידוא קפדני של business
+        // 🛡️ Security: strict update by ID, Role, and Business
         const updateRes = await UserModel.updateOne(
             {
                 _id: req.tokenData._id,
                 role: "admin",
-                business: req.tokenData.business
+                business: req.tokenData.business,
             },
             { $set: updates }
         );
@@ -396,7 +442,11 @@ router.patch("/admin/push-settings", authAdmin, async (req, res) => {
             return res.status(403).json({ error: "Update failed (User not found or not admin)" });
         }
 
-        const user = await UserModel.findOne({ _id: req.tokenData._id, business: req.tokenData.business })
+        // Fetch updated settings to return to client
+        const user = await UserModel.findOne({
+            _id: req.tokenData._id,
+            business: req.tokenData.business,
+        })
             .select("adminPushSettings")
             .lean();
 

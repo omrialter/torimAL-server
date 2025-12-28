@@ -1,50 +1,41 @@
-// models/appointmentModel.js
 const mongoose = require('mongoose');
 const Joi = require("joi");
 
 const appointmentSchema = new mongoose.Schema({
     business: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'businesses',
+        ref: 'businesses', // Ensure this matches your Business model name
         required: true
     },
-
     client: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'users',
         required: true
     },
-
-    // 👇 עובד שמבצע את הטיפול
     worker: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'users',
         required: true
     },
-
     service: {
         name: { type: String, required: true },
-        duration: { type: Number, required: true }, // in minutes
+        duration: { type: Number, required: true }, // duration in minutes
         price: { type: Number, required: true }
     },
-
     start: { type: Date, required: true },
-
     notes: String,
-
     status: {
         type: String,
         enum: ['confirmed', 'canceled', 'completed', 'no_show'],
         default: 'confirmed',
         required: true
     },
-
     createdAt: { type: Date, default: Date.now }
 });
 
-// אינדקס ייחודי על עסק+עובד+תחילת תור (רק לסטטוס confirmed)
-// ככה עובד אחד לא יכול להיות מוזמן פעמיים לאותה שעה,
-// אבל שני עובדים שונים כן יכולים לעבוד במקביל.
+// Compound Index: Prevents EXACT duplicate start times for the same worker.
+// Note: This does not prevent overlapping ranges (e.g. 10:00-11:00 vs 10:30-11:30),
+// that logic is handled in the controller.
 appointmentSchema.index(
     { business: 1, worker: 1, start: 1 },
     {
@@ -67,7 +58,7 @@ exports.validateAppointment = (_reqBody) => {
     const joiSchema = Joi.object({
         client: Joi.string().hex().length(24).required(),
         business: Joi.string().hex().length(24).required(),
-        worker: Joi.string().hex().length(24).required(), // 👈 חדש
+        worker: Joi.string().hex().length(24).required(),
         service: serviceSchema.required(),
         start: Joi.date().iso().greater('now').required(),
         notes: Joi.string().max(1000).allow("", null),

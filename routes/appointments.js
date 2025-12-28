@@ -1,61 +1,73 @@
-// routes/appointments.js
 const express = require("express");
 const mongoose = require("mongoose");
 const Joi = require("joi");
+const router = express.Router();
+
+// Internal Imports
 const { UserModel } = require("../models/userModel");
 const { AppointmentModel, validateAppointment } = require("../models/appointmentModel");
 const { auth, authAdmin } = require("../auth/auth");
 const { sendPushToManyTokens } = require("../services/pushService");
 
-const router = express.Router();
-
+// Constants
 const BLOCKING_STATUSES = ["confirmed"];
+const HOURS_24_MS = 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------
+// Helpers & Utilities
+// ---------------------------------------------------------
+
 const minutesToMs = (min) => min * 60 * 1000;
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
-// -------------------------
-// Admin Push Notify Helper
-// -------------------------
+/**
+ * Helper: Send push notifications to admins about appointment events
+ */
 async function notifyAdmins(businessId, eventType, title, body, data = {}) {
-    const settingKeyByEvent = {
-        appointment_created: "onAppointmentCreated",
-        appointment_canceled: "onAppointmentCanceled",
-        user_signup: "onUserSignup",
-    };
+    try {
+        const settingKeyByEvent = {
+            appointment_created: "onAppointmentCreated",
+            appointment_canceled: "onAppointmentCanceled",
+            user_signup: "onUserSignup",
+        };
 
-    const key = settingKeyByEvent[eventType];
-    if (!key) return { ok: false, error: "Unknown eventType" };
+        const settingKey = settingKeyByEvent[eventType];
+        if (!settingKey) return { ok: false, error: "Unknown eventType" };
 
-    const admins = await UserModel.find({
-        business: businessId,
-        role: "admin",
-        expoPushToken: { $exists: true, $ne: null },
-        "adminPushSettings.enabled": { $ne: false },
-    }).select("expoPushToken adminPushSettings");
+        const admins = await UserModel.find({
+            business: businessId,
+            role: "admin",
+            expoPushToken: { $exists: true, $ne: null },
+            "adminPushSettings.enabled": { $ne: false },
+        }).select("expoPushToken adminPushSettings");
 
-    const tokens = Array.from(
-        new Set(
-            admins
-                .filter((a) => a.adminPushSettings?.[key] !== false)
-                .map((a) => a.expoPushToken)
-                .filter((t) => typeof t === "string" && t.trim().length > 0)
-                .map((t) => t.trim())
-        )
-    );
+        const tokens = [
+            ...new Set(
+                admins
+                    .filter((a) => a.adminPushSettings?.[settingKey] !== false)
+                    .map((a) => a.expoPushToken)
+                    .filter((t) => typeof t === "string" && t.trim().length > 0)
+                    .map((t) => t.trim())
+            ),
+        ];
 
-    if (tokens.length === 0) return { ok: true, sent: 0 };
+        if (tokens.length === 0) return { ok: true, sent: 0 };
 
-    return sendPushToManyTokens(tokens, title, body, {
-        ...data,
-        type: "admin_event",
-        eventType,
-        businessId: String(businessId),
-        createdAt: new Date().toISOString(),
-    });
+        return await sendPushToManyTokens(tokens, title, body, {
+            ...data,
+            type: "admin_event",
+            eventType,
+            businessId: String(businessId),
+            createdAt: new Date().toISOString(),
+        });
+    } catch (err) {
+        console.error("notifyAdmins error:", err);
+        return { ok: false };
+    }
 }
 
 /**
- * עוזר - טווח יום UTC
+ * Helper: Get UTC start and end for a specific date string (YYYY-MM-DD)
  */
 function utcDayRange(dateStr) {
     const start = new Date(`${dateStr}T00:00:00.000Z`);
@@ -64,51 +76,90 @@ function utcDayRange(dateStr) {
 }
 
 /**
+ * Helper: Check for overlapping appointments
+ * Returns the conflicting appointment if found, otherwise null.
+ */
+async function checkAppointmentOverlap(business, worker, start, durationMinutes, excludeId = null) {
+    const startDate = new Date(start);
+    const endDate = new Date(startDate.getTime() + minutesToMs(durationMinutes));
+
+    const query = {
+        business,
+        worker,
+        status: { $in: BLOCKING_STATUSES },
+        $expr: {
+            $and: [
+                { $lt: ["$start", endDate] }, // Existing starts before new ends
+                {
+                    // Existing ends after new starts
+                    $gt: [
+                        { $add: ["$start", { $multiply: ["$service.duration", 60000] }] },
+                        startDate,
+                    ],
+                },
+            ],
+        },
+    };
+
+    if (excludeId) {
+        query._id = { $ne: excludeId };
+    }
+
+    return await AppointmentModel.findOne(query).lean();
+}
+
+// ---------------------------------------------------------
+// Routes
+// ---------------------------------------------------------
+
+/**
  * GET /appointments/by-day
+ * Fetch all appointments for a specific day and worker
  */
 router.get("/by-day", auth, async (req, res) => {
     try {
         const { date, worker } = req.query;
         const { business } = req.tokenData;
 
-        if (!business || !isValidObjectId(business)) {
-            return res.status(400).json({ error: "Invalid or missing business id" });
+        if (!isValidObjectId(business) || !isValidObjectId(worker)) {
+            return res.status(400).json({ error: "Invalid business or worker ID" });
         }
 
         if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return res.status(400).json({ error: "Invalid or missing date (YYYY-MM-DD)" });
-        }
-
-        if (!worker || !isValidObjectId(worker)) {
-            return res.status(400).json({ error: "Missing or invalid worker id" });
+            return res.status(400).json({ error: "Invalid date format (YYYY-MM-DD)" });
         }
 
         const { start, end } = utcDayRange(date);
 
+        // Find appointments that overlap with this day
+        // (including those that started yesterday but spill into today)
         const appts = await AppointmentModel.find({
             business,
             worker,
             start: { $lt: end },
             $expr: {
-                $gt: [{ $add: ["$start", { $multiply: ["$service.duration", 60000] }] }, start],
+                $gt: [
+                    { $add: ["$start", { $multiply: ["$service.duration", 60000] }] },
+                    start,
+                ],
             },
         })
             .sort({ start: 1 })
             .populate("business", "name address phone")
             .populate("worker", "name fullName phone")
             .populate("client", "name phone")
-            .lean()
-            .exec();
+            .lean();
 
         return res.json(appts);
     } catch (err) {
-        console.error(err);
+        console.error("GET /by-day error:", err);
         return res.status(502).json({ error: "Server error" });
     }
 });
 
 /**
  * GET /appointments/my
+ * Fetch appointments for the logged-in client
  */
 router.get("/my", auth, async (req, res) => {
     try {
@@ -119,48 +170,43 @@ router.get("/my", auth, async (req, res) => {
             return res.status(400).json({ error: "Invalid token data" });
         }
 
-        let statusFilter = undefined;
-        if (typeof statuses === "string" && statuses.trim()) {
-            const arr = statuses
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-
-            if (arr.length > 0) statusFilter = arr;
-        }
-
-        const includePastBool = includePast === "true";
-        const now = new Date();
-
         const query = { business, client: clientId };
 
-        if (statusFilter) query.status = { $in: statusFilter };
-        if (!includePastBool) query.start = { $gte: now };
+        // Filter by Status
+        if (statuses) {
+            const arr = statuses.split(",").map((s) => s.trim()).filter(Boolean);
+            if (arr.length > 0) query.status = { $in: arr };
+        }
+
+        // Filter Past Appointments
+        if (includePast !== "true") {
+            query.start = { $gte: new Date() };
+        }
 
         const appts = await AppointmentModel.find(query)
             .sort({ start: 1 })
             .populate("business", "name address phone")
             .populate("worker", "name fullName")
-            .lean()
-            .exec();
+            .lean();
 
         return res.json(appts);
     } catch (err) {
-        console.error("❌ Error in GET /appointments/my:", err);
+        console.error("GET /my error:", err);
         return res.status(502).json({ error: "Server error" });
     }
 });
 
 /**
  * GET /appointments/admin-stats
+ * Returns simple counts for the admin dashboard
  */
 router.get("/admin-stats", authAdmin, async (req, res) => {
     try {
         const { business } = req.tokenData;
         const { worker } = req.query;
 
-        if (!business || !isValidObjectId(business)) {
-            return res.status(400).json({ error: "Invalid or missing business id" });
+        if (!isValidObjectId(business)) {
+            return res.status(400).json({ error: "Invalid business ID" });
         }
 
         const baseFilter = {
@@ -168,10 +214,7 @@ router.get("/admin-stats", authAdmin, async (req, res) => {
             status: { $ne: "canceled" },
         };
 
-        if (worker) {
-            if (!isValidObjectId(worker)) {
-                return res.status(400).json({ error: "Invalid worker id" });
-            }
+        if (worker && isValidObjectId(worker)) {
             baseFilter.worker = worker;
         }
 
@@ -180,55 +223,58 @@ router.get("/admin-stats", authAdmin, async (req, res) => {
         const { start: todayStart, end: todayEnd } = utcDayRange(todayStr);
 
         const [todayCount, futureCount] = await Promise.all([
-            AppointmentModel.countDocuments({ ...baseFilter, start: { $gte: todayStart, $lt: todayEnd } }),
-            AppointmentModel.countDocuments({ ...baseFilter, start: { $gte: now } }),
+            AppointmentModel.countDocuments({
+                ...baseFilter,
+                start: { $gte: todayStart, $lt: todayEnd },
+            }),
+            AppointmentModel.countDocuments({
+                ...baseFilter,
+                start: { $gte: now },
+            }),
         ]);
 
         return res.json({ todayCount, futureCount });
     } catch (err) {
-        console.error("❌ Error in GET /appointments/admin-stats:", err);
+        console.error("GET /admin-stats error:", err);
         return res.status(502).json({ error: "Server error" });
     }
 });
 
-
 /**
  * GET /appointments/nearest-slots
- * חיפוש 5 התורים הפנויים הקרובים ביותר
+ * Algorithm to find the next 5 available slots
  */
 router.get("/nearest-slots", auth, async (req, res) => {
     try {
         const { business } = req.tokenData;
         const { worker, duration } = req.query;
 
-        // ולידציות בסיסיות
         if (!isValidObjectId(business) || !isValidObjectId(worker)) {
             return res.status(400).json({ error: "Invalid IDs" });
         }
 
-        const serviceDurationMin = parseInt(duration) || 30; // ברירת מחדל 30 דקות
+        const serviceDurationMin = parseInt(duration) || 30;
         const neededMs = minutesToMs(serviceDurationMin);
 
-        // הגדרות עבודה (בפועל - לשלוף מה-BusinessModel)
+        // TODO: Move these constants to the BusinessModel in the database
         const WORK_START_HOUR = 8;
         const WORK_END_HOUR = 20;
-        const SLOT_INTERVAL_MIN = 20; // קפיצות של 20 דקות בחיפוש
+        const SLOT_INTERVAL_MIN = 20;
 
         let foundSlots = [];
-        let dateIterator = new Date(); // מתחילים מעכשיו
+        let dateIterator = new Date(); // Start searching from now
 
-        // אם עכשיו אחרי שעות העבודה, נתחיל ממחר בבוקר
+        // If currently after work hours, skip to tomorrow morning
         if (dateIterator.getHours() >= WORK_END_HOUR) {
             dateIterator.setDate(dateIterator.getDate() + 1);
             dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
         }
 
-        // הגנה: לא לחפש יותר מ-14 יום קדימה כדי לא להיתקע בלולאה
         let daysChecked = 0;
+        const MAX_DAYS_CHECK = 14; // Prevent infinite loops
 
-        while (foundSlots.length < 5 && daysChecked < 14) {
-
-            // 1. הגדרת טווח החיפוש לאותו יום ספציפי
+        while (foundSlots.length < 5 && daysChecked < MAX_DAYS_CHECK) {
+            // 1. Define day range
             let dayStart = new Date(dateIterator);
             if (dayStart.getHours() < WORK_START_HOUR) {
                 dayStart.setHours(WORK_START_HOUR, 0, 0, 0);
@@ -237,7 +283,7 @@ router.get("/nearest-slots", auth, async (req, res) => {
             let dayEnd = new Date(dateIterator);
             dayEnd.setHours(WORK_END_HOUR, 0, 0, 0);
 
-            // אם כבר עברנו את סוף היום הנוכחי, נדלג ליום הבא
+            // If day is already over, skip
             if (dayStart >= dayEnd) {
                 dateIterator.setDate(dateIterator.getDate() + 1);
                 dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
@@ -245,49 +291,49 @@ router.get("/nearest-slots", auth, async (req, res) => {
                 continue;
             }
 
-            // 2. שליפת כל התורים הקיימים לאותו יום
-            // אופטימיזציה: שולפים רק את ה-start וה-duration
+            // 2. Fetch existing appointments for this day
             const appointmentsToday = await AppointmentModel.find({
                 business,
                 worker,
                 status: { $in: BLOCKING_STATUSES },
-                start: { $gte: dayStart, $lt: dayEnd }
-            }).select('start service.duration').lean();
+                start: { $gte: dayStart, $lt: dayEnd },
+            })
+                .select("start service.duration")
+                .lean();
 
-            // 3. לולאה פנימית על השעות ביום
+            // 3. Scan slots within the day
             let currentSlot = new Date(dayStart);
 
             while (currentSlot < dayEnd && foundSlots.length < 5) {
                 const slotEnd = new Date(currentSlot.getTime() + neededMs);
 
-                // אם התור חורג משעות הפעילות
+                // Slot exceeds working hours
                 if (slotEnd > dayEnd) break;
 
-                // בדיקת התנגשות
-                const isTaken = appointmentsToday.some(appt => {
+                // Check overlap
+                const isTaken = appointmentsToday.some((appt) => {
                     const apptStart = new Date(appt.start);
-                    const apptEnd = new Date(apptStart.getTime() + minutesToMs(appt.service.duration));
-
-                    // בדיקת חפיפה קלאסית
-                    return (currentSlot < apptEnd && slotEnd > apptStart);
+                    const apptEnd = new Date(
+                        apptStart.getTime() + minutesToMs(appt.service.duration)
+                    );
+                    return currentSlot < apptEnd && slotEnd > apptStart;
                 });
 
                 if (!isTaken) {
-                    foundSlots.push(new Date(currentSlot)); // מצאנו תור!
+                    foundSlots.push(new Date(currentSlot));
                 }
 
-                // מתקדמים ב-30 דקות (או כל אינטרוול שתבחר)
+                // Advance
                 currentSlot = new Date(currentSlot.getTime() + minutesToMs(SLOT_INTERVAL_MIN));
             }
 
-            // קידום ליום הבא
+            // Next day
             dateIterator.setDate(dateIterator.getDate() + 1);
             dateIterator.setHours(WORK_START_HOUR, 0, 0, 0);
             daysChecked++;
         }
 
         return res.json({ slots: foundSlots });
-
     } catch (err) {
         console.error("Error finding nearest slots:", err);
         return res.status(500).json({ error: "Server error" });
@@ -296,14 +342,14 @@ router.get("/nearest-slots", auth, async (req, res) => {
 
 /**
  * POST /appointments
- * יצירת תור
+ * Create a new appointment
  */
 router.post("/", auth, async (req, res) => {
     const { business } = req.tokenData;
-
     const payload = { ...req.body, business };
-    const { error, value } = validateAppointment(payload);
 
+    // 1. Validation
+    const { error, value } = validateAppointment(payload);
     if (error) {
         return res.status(400).json({
             error: error.details?.[0]?.message || "Validation error",
@@ -312,17 +358,21 @@ router.post("/", auth, async (req, res) => {
 
     const { client, worker, service, start, notes } = value;
 
-    if (!isValidObjectId(business) || !isValidObjectId(client) || !isValidObjectId(worker)) {
-        return res.status(400).json({ error: "Invalid business/client/worker id" });
+    if (!isValidObjectId(client) || !isValidObjectId(worker)) {
+        return res.status(400).json({ error: "Invalid client or worker ID" });
     }
 
     try {
-        const user = await UserModel.findOne({ _id: client, business }).lean();
-        if (!user) return res.status(400).json({ error: "Client does not belong to this business" });
+        // 2. Ownership Checks
+        const [clientUser, workerUser] = await Promise.all([
+            UserModel.findOne({ _id: client, business }).lean(),
+            UserModel.findOne({ _id: worker, business }).lean(),
+        ]);
 
-        const workerDoc = await UserModel.findOne({ _id: worker, business }).lean();
-        if (!workerDoc) return res.status(400).json({ error: "Worker does not belong to this business" });
+        if (!clientUser) return res.status(400).json({ error: "Client not found in business" });
+        if (!workerUser) return res.status(400).json({ error: "Worker not found in business" });
 
+        // 3. Max Confirmed Check (Logic restriction)
         const confirmedCount = await AppointmentModel.countDocuments({
             business,
             client,
@@ -332,63 +382,50 @@ router.post("/", auth, async (req, res) => {
         if (confirmedCount >= 3) {
             return res.status(403).json({
                 error: "MAX_CONFIRMED_REACHED",
-                message: "לא ניתן לקבוע יותר מ3 תורים במצב מאושר.",
+                message: "Limit reached: You have 3 active appointments.",
             });
         }
 
-        const startDate = new Date(start);
-        const endDate = new Date(startDate.getTime() + minutesToMs(service.duration));
-
-        const overlapping = await AppointmentModel.findOne({
+        // 4. Overlap Check
+        const overlap = await checkAppointmentOverlap(
             business,
             worker,
-            status: { $in: BLOCKING_STATUSES },
-            $expr: {
-                $and: [
-                    { $lt: ["$start", endDate] },
-                    {
-                        $gt: [{ $add: ["$start", { $multiply: ["$service.duration", 60000] }] }, startDate],
-                    },
-                ],
-            },
-        }).lean();
+            start,
+            service.duration
+        );
 
-        if (overlapping) return res.status(409).json({ error: "SLOT_TAKEN" });
+        if (overlap) return res.status(409).json({ error: "SLOT_TAKEN" });
 
+        // 5. Create
         const doc = await AppointmentModel.create({
             business,
             client,
             worker,
             service,
-            start: startDate,
+            start,
             status: "confirmed",
             notes: notes || "",
-            createdAt: new Date(),
         });
 
-        // ✅ Push לאדמינים על תור חדש (לא מפיל יצירת תור אם נכשל)
-        try {
-            const startIso = new Date(doc.start).toISOString();
-            await notifyAdmins(
-                business,
-                "appointment_created",
-                "נקבע תור חדש",
-                `נקבע תור חדש ב-${startIso.slice(0, 10)} ${startIso.slice(11, 16)}`,
-                { appointmentId: String(doc._id) }
-            );
-        } catch (e) {
-            console.error("notifyAdmins(appointment_created) failed:", e);
-        }
+        // 6. Notify Admins (Async)
+        notifyAdmins(
+            business,
+            "appointment_created",
+            "New Appointment",
+            `New appointment at ${new Date(start).toLocaleTimeString("he-IL")}`,
+            { appointmentId: String(doc._id) }
+        ).catch((e) => console.error("Notify failed:", e));
 
         return res.status(201).json(doc);
     } catch (err) {
-        console.error("❌ Error in POST /appointments:", err);
+        console.error("POST /appointments error:", err);
         return res.status(500).json({ error: "Server error" });
     }
 });
 
 /**
- * PATCH /appointments/:id/status (אדמין)
+ * PATCH /appointments/:id/status
+ * Admin: Update status
  */
 const statusSchema = Joi.object({
     status: Joi.string().valid("confirmed", "canceled", "completed", "no_show").required(),
@@ -400,38 +437,24 @@ router.patch("/:id/status", authAdmin, async (req, res) => {
         const { id } = req.params;
         const { business } = req.tokenData;
 
-        if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid appointment id" });
+        if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid ID" });
 
         const appt = await AppointmentModel.findOne({ _id: id, business }).lean();
         if (!appt) return res.status(404).json({ error: "Appointment not found" });
 
         const { error, value } = statusSchema.validate(req.body);
-        if (error) {
-            return res.status(400).json({ error: error.details?.[0]?.message || "Validation error" });
-        }
+        if (error) return res.status(400).json({ error: error.details?.[0]?.message });
 
-        const { status } = value;
-
-        if (status === "confirmed") {
-            const startDate = new Date(appt.start);
-            const endDate = new Date(startDate.getTime() + minutesToMs(appt.service.duration));
-
-            const conflict = await AppointmentModel.findOne({
-                _id: { $ne: appt._id },
-                business: appt.business,
-                worker: appt.worker,
-                status: { $in: BLOCKING_STATUSES },
-                $expr: {
-                    $and: [
-                        { $lt: ["$start", endDate] },
-                        {
-                            $gt: [{ $add: ["$start", { $multiply: ["$service.duration", 60000] }] }, startDate],
-                        },
-                    ],
-                },
-            }).lean();
-
-            if (conflict) return res.status(409).json({ error: "SLOT_TAKEN" });
+        // Re-check overlap if setting to confirmed
+        if (value.status === "confirmed" && appt.status !== "confirmed") {
+            const overlap = await checkAppointmentOverlap(
+                business,
+                appt.worker,
+                appt.start,
+                appt.service.duration,
+                appt._id // Exclude self
+            );
+            if (overlap) return res.status(409).json({ error: "SLOT_TAKEN" });
         }
 
         const updated = await AppointmentModel.findOneAndUpdate(
@@ -443,57 +466,47 @@ router.patch("/:id/status", authAdmin, async (req, res) => {
             { new: true }
         ).exec();
 
-        // אם אדמין שינה ל-canceled – גם זה “ביטול תור”
+        // Notify if canceled by admin
         if (value.status === "canceled") {
-            try {
-                const startIso = new Date(updated.start).toISOString();
-                await notifyAdmins(
-                    business,
-                    "appointment_canceled",
-                    "תור בוטל",
-                    `תור ב-${startIso.slice(0, 10)} ${startIso.slice(11, 16)} בוטל`,
-                    { appointmentId: String(updated._id) }
-                );
-            } catch (e) {
-                console.error("notifyAdmins(appointment_canceled via admin) failed:", e);
-            }
+            notifyAdmins(
+                business,
+                "appointment_canceled",
+                "Appointment Canceled",
+                "An appointment was canceled by admin",
+                { appointmentId: String(updated._id) }
+            ).catch((e) => console.error("Notify failed:", e));
         }
 
         return res.json(updated);
     } catch (err) {
-        console.error(err);
+        console.error("PATCH status error:", err);
         return res.status(502).json({ error: "Server error" });
     }
 });
 
 /**
- * PATCH /appointments/:id/cancel (משתמש)
+ * PATCH /appointments/:id/cancel
+ * Client: Cancel appointment (24h restriction)
  */
-const HOURS_24_MS = 24 * 60 * 60 * 1000;
-
 router.patch("/:id/cancel", auth, async (req, res) => {
     try {
         const { id } = req.params;
         const { _id: clientId, business } = req.tokenData;
 
-        if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid appointment id" });
-        if (!isValidObjectId(clientId) || !isValidObjectId(business)) {
-            return res.status(400).json({ error: "Invalid token data" });
-        }
+        if (!isValidObjectId(id)) return res.status(400).json({ error: "Invalid ID" });
 
         const appt = await AppointmentModel.findOne({
             _id: id,
             client: clientId,
             business,
-        }).exec();
+        });
 
         if (!appt) return res.status(404).json({ error: "Appointment not found" });
         if (appt.status !== "confirmed") {
             return res.status(400).json({ error: "ONLY_CONFIRMED_CAN_BE_CANCELED" });
         }
 
-        const now = new Date();
-        const diffMs = appt.start.getTime() - now.getTime();
+        const diffMs = new Date(appt.start).getTime() - Date.now();
         if (diffMs < HOURS_24_MS) {
             return res.status(409).json({ error: "CANNOT_CANCEL_WITHIN_24H" });
         }
@@ -501,23 +514,17 @@ router.patch("/:id/cancel", auth, async (req, res) => {
         appt.status = "canceled";
         await appt.save();
 
-        // ✅ Push לאדמינים על ביטול תור (לא מפיל ביטול אם נכשל)
-        try {
-            const startIso = new Date(appt.start).toISOString();
-            await notifyAdmins(
-                business,
-                "appointment_canceled",
-                "תור בוטל",
-                `תור ב-${startIso.slice(0, 10)} ${startIso.slice(11, 16)} בוטל`,
-                { appointmentId: String(appt._id) }
-            );
-        } catch (e) {
-            console.error("notifyAdmins(appointment_canceled) failed:", e);
-        }
+        notifyAdmins(
+            business,
+            "appointment_canceled",
+            "Client Canceled Appointment",
+            `A client canceled an appointment`,
+            { appointmentId: String(appt._id) }
+        ).catch((e) => console.error("Notify failed:", e));
 
         return res.json(appt);
     } catch (err) {
-        console.error("❌ Error in PATCH /appointments/:id/cancel", err);
+        console.error("PATCH cancel error:", err);
         return res.status(502).json({ error: "Server error" });
     }
 });

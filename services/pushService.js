@@ -1,21 +1,19 @@
-// services/pushService.js
 const { Expo } = require("expo-server-sdk");
 
-// יוצרים מופע יחיד של Expo SDK
+// Create a new Expo SDK client
 const expo = new Expo();
 
 /**
- * שולח פוש למכשיר אחד (לפי expoPushToken)
+ * Send a push notification to a single device token.
  * @param {string} expoPushToken
  * @param {string} title
  * @param {string} body
- * @param {object} data  - אובייקט אופציונלי (למתן מידע נוסף לקליינט)
+ * @param {object} data - Optional data payload
  */
 async function sendPushToToken(expoPushToken, title, body, data = {}) {
     try {
         if (!Expo.isExpoPushToken(expoPushToken)) {
             console.warn("Invalid Expo push token:", expoPushToken);
-            // מחזירים תוצאה מסודרת כדי שהקוד שקורא ידע שזה נכשל
             return { ok: false, error: "InvalidExpoPushToken" };
         }
 
@@ -29,6 +27,7 @@ async function sendPushToToken(expoPushToken, title, body, data = {}) {
             },
         ];
 
+        // Expo handles chunking even for single messages (good practice)
         const chunks = expo.chunkPushNotifications(messages);
         const tickets = [];
 
@@ -42,6 +41,12 @@ async function sendPushToToken(expoPushToken, title, body, data = {}) {
             }
         }
 
+        // Check if the specific ticket contains an error
+        if (tickets[0] && tickets[0].status === "error") {
+            console.error("Expo Ticket Error:", tickets[0]);
+            return { ok: false, error: tickets[0].details?.error || "UnknownTicketError" };
+        }
+
         return { ok: true, tickets };
     } catch (err) {
         console.error("sendPushToToken error:", err);
@@ -50,41 +55,43 @@ async function sendPushToToken(expoPushToken, title, body, data = {}) {
 }
 
 /**
- * שולח פוש להרבה מכשירים (tokens) בצורה יעילה + מחזיר סטטיסטיקות.
- * מומלץ לשימוש ב-"broadcast" כמו אדמין שולח לכל העסק.
+ * Send push notifications to multiple tokens efficiently.
+ * Handles chunking and identifies invalid tokens from the immediate server response.
  *
- * @param {string[]} tokens
+ * @param {string[]} tokens - Array of Expo Push Tokens
  * @param {string} title
  * @param {string} body
  * @param {object} data
- * @returns { successCount, failCount, invalidTokens, ticketCount, receiptErrorCount }
+ * @returns {Promise<{successCount: number, failCount: number, invalidTokens: string[]}>}
  */
 async function sendPushToManyTokens(tokens, title, body, data = {}) {
-    // 1) ניקוי tokens: רק strings לא ריקים + dedupe
+    // 1. Clean and Deduplicate Tokens
     const uniqueTokens = Array.from(
         new Set(tokens.filter((t) => typeof t === "string" && t.trim().length > 0))
     );
 
-    // 2) הפרדה בין tokens “ממש לא תקינים” לבין תקינים
+    // 2. Separate format-invalid tokens immediately
     const invalidTokens = [];
     const validTokens = [];
 
     for (const t of uniqueTokens) {
-        if (!Expo.isExpoPushToken(t)) invalidTokens.push(t);
-        else validTokens.push(t);
+        if (!Expo.isExpoPushToken(t)) {
+            invalidTokens.push(t);
+        } else {
+            validTokens.push(t);
+        }
     }
 
     if (validTokens.length === 0) {
         return {
             successCount: 0,
             failCount: 0,
-            invalidTokens,
-            ticketCount: 0,
-            receiptErrorCount: 0,
+            invalidTokens, // Returns tokens that failed regex validation
         };
     }
 
-    // 3) בניית messages לכל הטוקנים
+    // 3. Construct Messages
+    // We keep the 'messages' array flat to map tickets back to tokens later
     const messages = validTokens.map((to) => ({
         to,
         sound: "default",
@@ -93,10 +100,9 @@ async function sendPushToManyTokens(tokens, title, body, data = {}) {
         data,
     }));
 
-    // 4) שליחה בצ'אנקים לפי Expo
+    // 4. Send in Chunks
     const chunks = expo.chunkPushNotifications(messages);
-
-    const tickets = []; // כל טיקט מתאים להודעה שיצאה
+    const tickets = [];
     let sendErrors = 0;
 
     for (const chunk of chunks) {
@@ -104,87 +110,49 @@ async function sendPushToManyTokens(tokens, title, body, data = {}) {
             const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
             tickets.push(...ticketChunk);
         } catch (e) {
-            sendErrors += 1;
             console.error("expo.sendPushNotificationsAsync error:", e);
+            sendErrors += chunk.length; // Count all messages in chunk as failed
         }
     }
 
-    // 5) ניתוח tickets: success/fail מיידי (לפעמים השגיאה כבר כאן)
-    // בנוסף, אוספים receiptIds כדי למשוך receipts.
-    const receiptIds = [];
-    let immediateFailCount = 0;
-    let immediateSuccessCount = 0;
+    // 5. Analyze Tickets to find Invalid Tokens
+    // The 'tickets' array corresponds 1-to-1 with the 'messages' array (if no chunks failed completely)
+    // NOTE: If a whole chunk failed (exception caught above), tickets array might be shorter than messages.
+    // We align them carefully.
 
-    for (const ticket of tickets) {
-        if (!ticket) continue;
+    let successCount = 0;
+    let failCount = sendErrors;
+
+    // We iterate up to the number of tickets received
+    for (let i = 0; i < tickets.length; i++) {
+        const ticket = tickets[i];
+        const originalToken = messages[i].to; // Mapping back to the token
 
         if (ticket.status === "ok") {
-            immediateSuccessCount += 1;
-            if (ticket.id) receiptIds.push(ticket.id);
+            successCount++;
         } else {
-            // status === "error"
-            immediateFailCount += 1;
+            // Status is 'error'
+            failCount++;
 
-            // לפעמים כאן כבר נקבל DeviceNotRegistered וכו'
-            const details = ticket.details || {};
-            const errCode = details.error;
-
-            if (errCode === "DeviceNotRegistered") {
-                // לא תמיד יש פה token – Expo לא מחזיר token בתוך ticket,
-                // לכן את ניקוי ה-token עדיף לעשות על בסיס receipts (שלב 6).
+            // If the error indicates the device is no longer valid, add to invalid list
+            if (ticket.details && ticket.details.error === "DeviceNotRegistered") {
+                invalidTokens.push(originalToken);
             }
         }
     }
 
-    // 6) משיכת receipts: מאפשר לזהות DeviceNotRegistered בצורה אמינה יותר
-    let receiptErrorCount = 0;
-    let receiptDeviceNotRegisteredCount = 0;
-
-    if (receiptIds.length > 0) {
-        const receiptIdChunks = expo.chunkPushNotificationReceiptIds(receiptIds);
-
-        for (const chunk of receiptIdChunks) {
-            try {
-                const receipts = await expo.getPushNotificationReceiptsAsync(chunk);
-
-                for (const receiptId of Object.keys(receipts)) {
-                    const receipt = receipts[receiptId];
-                    if (!receipt) continue;
-
-                    if (receipt.status === "error") {
-                        receiptErrorCount += 1;
-
-                        const details = receipt.details || {};
-                        const errCode = details.error;
-
-                        if (errCode === "DeviceNotRegistered") {
-                            receiptDeviceNotRegisteredCount += 1;
-                            // שוב: receipts לא מחזירים token ישירות.
-                            // לכן אם אתה רוצה "ניקוי טוקנים" מדויק 1:1,
-                            // צריך לשמור mapping של message->ticketId->token.
-                            // (מוסבר בהערה למטה)
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error("expo.getPushNotificationReceiptsAsync error:", e);
-            }
-        }
-    }
-
-    // 7) סיכום
-    // שים לב: "successCount" כאן הוא בעיקר על בסיס tickets 'ok' (כלומר, נמסר ל-Expo).
-    // הצלחה אמיתית למכשיר תלויה ב-receipts, אבל Expo לא תמיד נותן מיפוי קל לטוקן.
-    const successCount = immediateSuccessCount;
-    const failCount = immediateFailCount + sendErrors;
+    /**
+     * NOTE regarding Receipts:
+     * We do NOT fetch receipts here (getPushNotificationReceiptsAsync).
+     * Receipts are asynchronous and may take minutes to generate.
+     * Fetching them immediately often yields nothing.
+     * For a robust system, a separate background job (Cron) should check receipts.
+     */
 
     return {
         successCount,
         failCount,
-        invalidTokens,
-        ticketCount: tickets.length,
-        receiptErrorCount,
-        receiptDeviceNotRegisteredCount,
+        invalidTokens, // Contains both regex-fail and DeviceNotRegistered tokens
     };
 }
 

@@ -1,4 +1,3 @@
-// models/blockModel.js
 const mongoose = require("mongoose");
 const Joi = require("joi");
 
@@ -6,7 +5,7 @@ const BLOCK_REASONS = ["vacation", "maintenance", "training", "other"];
 
 const blockSchema = new mongoose.Schema(
     {
-        // העסק שעליו החסימה חלה (חובה)
+        // The business this block applies to
         business: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "businesses",
@@ -14,32 +13,31 @@ const blockSchema = new mongoose.Schema(
             index: true,
         },
 
-        // משאב ספציפי (עובד/עמדה). null = כל העסק.
+        // Specific resource (Worker/Station). If null, applies to the entire business.
         resource: {
             type: mongoose.Schema.Types.ObjectId,
-            ref: "users", // אם יש לך קולקציה אחרת לעובדים – תעדכן כאן
+            ref: "users",
             default: null,
             index: true,
         },
 
-        // טווח זמן ב-UTC
+        // Time range in UTC
         start: { type: Date, required: true, index: true },
         end: { type: Date, required: true },
 
-        // אזור זמן להצגה בלבד (לא לחישובים)
+        // Display timezone (informative only)
         timezone: { type: String, required: true, default: "Asia/Jerusalem" },
 
-        // סיבה והערות
         reason: { type: String, enum: BLOCK_REASONS, default: "other" },
         notes: { type: String },
 
-        // מי יצר את הבלוק
+        // Audit: Who created the block
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "users",
         },
 
-        // מחיקה רכה – אם תרצה "לבטל" חסימה בלי למחוק מהדאטהבייס
+        // Soft Delete: Allows history tracking instead of permanent removal
         active: {
             type: Boolean,
             default: true,
@@ -51,11 +49,11 @@ const blockSchema = new mongoose.Schema(
     }
 );
 
-// אינדקסים לשיפור חיפושים טיפוסיים
+// Indexes for common queries
 blockSchema.index({ business: 1, resource: 1, start: 1, active: 1 });
 blockSchema.index({ business: 1, start: 1, active: 1 });
 
-// ולידציה בסיסית לפני שמירה
+// Pre-save validation: Ensure end time is after start time
 blockSchema.pre("save", function (next) {
     if (this.end <= this.start) {
         return next(new Error('Block "end" must be greater than "start"'));
@@ -63,29 +61,24 @@ blockSchema.pre("save", function (next) {
     next();
 });
 
-exports.BlockModel =
-    mongoose.models.blocks || mongoose.model("blocks", blockSchema);
+exports.BlockModel = mongoose.models.blocks || mongoose.model("blocks", blockSchema);
 
 // ================== Joi Validation ==================
 
-exports.validateBlock = (_reqBody) => {
+exports.validateBlock = (reqBody) => {
     const joiSchema = Joi.object({
         business: Joi.string().hex().length(24).required(),
         resource: Joi.string().hex().length(24).allow(null),
-
         start: Joi.date().iso().required(),
         end: Joi.date().iso().greater(Joi.ref("start")).required(),
-
         timezone: Joi.string().default("Asia/Jerusalem"),
-
         reason: Joi.string().valid(...BLOCK_REASONS).default("other"),
         notes: Joi.string().max(1000).allow("", null),
-
         createdBy: Joi.string().hex().length(24).optional(),
         active: Joi.boolean().default(true),
     });
 
-    return joiSchema.validate(_reqBody, {
+    return joiSchema.validate(reqBody, {
         abortEarly: false,
         stripUnknown: true,
     });
