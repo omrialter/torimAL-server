@@ -456,5 +456,6 @@ router.patch("/admin/push-settings", authAdmin, async (req, res) => {
         res.status(500).json({ error: "Server error" });
     }
 });
+// update trigger for render
 
 module.exports = router;
